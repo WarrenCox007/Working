@@ -53,6 +53,21 @@ pub mod enabled {
         Ok(())
     }
 
+    pub fn delete_docs(path: &Path, paths: &[String]) -> Result<()> {
+        let index = Index::open_in_dir(path)?;
+        let schema = index.schema();
+        let path_field = schema
+            .get_field("path")
+            .ok_or_else(|| anyhow!("path field missing in index schema"))?;
+        let mut writer: IndexWriter = index.writer(50_000_000)?;
+        for p in paths {
+            writer.delete_term(Term::from_field_text(path_field, p));
+        }
+        writer.commit()?;
+        index.directory().sync_directory()?;
+        Ok(())
+    }
+
     pub fn search(path: &Path, query_str: &str, limit: usize) -> Result<Vec<String>> {
         let index = Index::open_in_dir(path)?;
         let schema = index.schema();
@@ -88,5 +103,11 @@ pub mod enabled {
     }
     pub fn search(_path: &Path, _query: &str, _limit: usize) -> Result<Vec<String>> {
         Ok(vec![])
+    }
+    pub fn upsert_docs(_path: &Path, _docs: &[(String, String)]) -> Result<()> {
+        Ok(())
+    }
+    pub fn delete_docs(_path: &Path, _paths: &[String]) -> Result<()> {
+        Ok(())
     }
 }

@@ -29,7 +29,7 @@ async fn main() -> Result<()> {
         Commands::Classify { json } => run_pipeline(cfg, PipelineMode::Classify, json).await,
         Commands::Suggest { json, list, tags } => {
             if list {
-                run_actions(cfg, "planned", None, None, false, &tags, &[], json).await
+                run_actions(cfg, "planned", None, None, false, false, &tags, &[], json).await
             } else {
                 run_pipeline(cfg, PipelineMode::Suggest, json).await
             }
@@ -39,6 +39,7 @@ async fn main() -> Result<()> {
             ids,
             json,
             fields,
+            summary,
             verbose,
             allow_paths,
             deny_paths,
@@ -50,6 +51,7 @@ async fn main() -> Result<()> {
                 dry_run,
                 ids.as_deref(),
                 json,
+                summary,
                 verbose,
                 allow_paths,
                 deny_paths,
@@ -93,6 +95,7 @@ async fn main() -> Result<()> {
             rule,
             kind,
             has_backup,
+            duplicates_only,
             tags,
             fields,
             json,
@@ -103,6 +106,7 @@ async fn main() -> Result<()> {
                 rule.as_deref(),
                 kind.as_deref(),
                 has_backup,
+                duplicates_only,
                 &tags,
                 &fields,
                 json,
@@ -167,6 +171,9 @@ enum Commands {
         /// Restrict output fields (comma-separated), e.g. id,path,kind,status,backup
         #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = Vec::<String>::new())]
         fields: Vec<String>,
+        /// Show brief summary instead of full rows (non-JSON)
+        #[arg(long, default_value_t = false)]
+        summary: bool,
         /// Verbose per-action output (non-JSON)
         #[arg(long, default_value_t = false)]
         verbose: bool,
@@ -232,6 +239,9 @@ enum Commands {
         /// Filter by backup presence
         #[arg(long, default_value_t = false)]
         has_backup: bool,
+        /// Show only duplicate-related actions
+        #[arg(long, default_value_t = false)]
+        duplicates_only: bool,
         /// Filter by tag names (comma-separated)
         #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = Vec::<String>::new())]
         tags: Vec<String>,
@@ -751,6 +761,49 @@ async fn enrich_paths(
     Ok(results)
 }
 
+async fn enrich_paths_for_index(
+    db_path: &str,
+    paths: &[String],
+    tags: Option<&[String]>,
+) -> Result<(Vec<(String, String)>, Vec<String>)> {
+    if paths.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let pool = storage::connect(db_path).await?;
+    let mut qb = QueryBuilder::new("SELECT path, mime FROM files WHERE path IN (");
+    let mut separated = qb.separated(", ");
+    for p in paths {
+        separated.push_bind(p);
+    }
+    separated.push_unseparated(")");
+    if let Some(tag_list) = tags {
+        if !tag_list.is_empty() {
+            qb.push(" AND EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id WHERE ft.file_id = files.id AND t.name IN (");
+            let mut sep = qb.separated(", ");
+            for t in tag_list {
+                sep.push_bind(t);
+            }
+            sep.push_unseparated("))");
+        }
+    }
+    let rows = qb.build().fetch_all(&pool).await?;
+    let mut docs = Vec::new();
+    let mut found = std::collections::HashSet::new();
+    for row in rows {
+        let path: String = row.get(0);
+        let mime: Option<String> = row.try_get(1).ok();
+        let mime_text = mime.as_deref().unwrap_or("");
+        docs.push((path.clone(), format!("{} {}", path, mime_text)));
+        found.insert(path);
+    }
+    let missing: Vec<String> = paths
+        .iter()
+        .filter(|p| !found.contains(*p))
+        .cloned()
+        .collect();
+    Ok((docs, missing))
+}
+
 async fn keyword_index_search(
     cfg: &AppConfig,
     query: &str,
@@ -789,25 +842,30 @@ async fn refresh_keyword_index_if_dirty(cfg: &AppConfig, tags: Option<&[String]>
         return Ok(());
     }
     let pool = storage::connect(&cfg.database.path).await?;
-    let count: i64 = sqlx::query("SELECT COUNT(1) FROM dirty")
-        .fetch_one(&pool)
-        .await?
-        .get(0);
-    if count == 0 {
+    let rows = sqlx::query("SELECT path FROM dirty")
+        .fetch_all(&pool)
+        .await?;
+    if rows.is_empty() {
         return Ok(());
     }
+    let paths: Vec<String> = rows.into_iter().filter_map(|r| r.try_get(0).ok()).collect();
     let dir = keyword_index_dir(&cfg.database.path);
-    let docs = keyword_search(&cfg.database.path, "", None, None, None, None, tags)
-        .await?
-        .into_iter()
-        .filter_map(|v| {
-            let path = v.get("path")?.as_str()?;
-            let mime_text = v.get("mime").and_then(|m| m.as_str()).unwrap_or("");
-            Some((path.to_string(), format!("{} {}", path, mime_text)))
-        })
-        .collect::<Vec<_>>();
-    let _ = keyword_index::enabled::build_index(&dir, &docs);
-    let _ = sqlx::query("DELETE FROM dirty").execute(&pool).await;
+    let (docs, missing) = enrich_paths_for_index(&cfg.database.path, &paths, tags).await?;
+    if dir.join("meta.json").exists() {
+        let _ = keyword_index::enabled::upsert_docs(&dir, &docs);
+        if !missing.is_empty() {
+            let _ = keyword_index::enabled::delete_docs(&dir, &missing);
+        }
+    } else {
+        let _ = keyword_index::enabled::build_index(&dir, &docs);
+    }
+    let mut qb = QueryBuilder::new("DELETE FROM dirty WHERE path IN (");
+    let mut separated = qb.separated(", ");
+    for p in &paths {
+        separated.push_bind(p);
+    }
+    separated.push_unseparated(")");
+    let _ = qb.build().execute(&pool).await;
     Ok(())
 }
 
@@ -854,6 +912,7 @@ async fn run_apply(
     dry_run: bool,
     ids: Option<&str>,
     json: bool,
+    summary: bool,
     verbose: bool,
     allow_override: Option<String>,
     deny_override: Option<String>,
@@ -886,14 +945,35 @@ async fn run_apply(
         .iter()
         .filter_map(|a| serde_json::to_value(a).ok())
         .collect();
-    if let Some(f) = fields {
-        vals = filter_fields(vals, &f);
-    }
+    let default_fields = vec![
+        "id".to_string(),
+        "path".to_string(),
+        "kind".to_string(),
+        "status".to_string(),
+        "backup".to_string(),
+        "error".to_string(),
+    ];
+    let filtered_fields = fields.clone().unwrap_or_else(|| default_fields.clone());
+    vals = filter_fields(vals, &filtered_fields);
     if json {
         println!("{}", serde_json::to_string_pretty(&vals)?);
+    } else if summary {
+        let processed = vals.len();
+        let executed = vals
+            .iter()
+            .filter(|v| v.get("status").and_then(|s| s.as_str()) == Some("executed"))
+            .count();
+        let failed = vals
+            .iter()
+            .filter(|v| v.get("status").and_then(|s| s.as_str()) == Some("error"))
+            .count();
+        println!(
+            "apply summary: processed={}, executed={}, failed={}, dry_run={}",
+            processed, executed, failed, dry_run
+        );
     } else {
         println!("processed {} actions", vals.len());
-        if verbose {
+        if verbose || fields.is_some() {
             for v in &vals {
                 println!("{}", serde_json::to_string(v)?);
             }
@@ -908,6 +988,7 @@ async fn run_actions(
     rule: Option<&str>,
     kind: Option<&str>,
     has_backup: bool,
+    duplicates_only: bool,
     tags: &[String],
     fields: &[String],
     json: bool,
@@ -926,6 +1007,9 @@ async fn run_actions(
     }
     if has_backup {
         query.push(" AND actions.backup_path IS NOT NULL AND actions.backup_path != ''");
+    }
+    if duplicates_only {
+        query.push(" AND actions.payload_json LIKE '%\"duplicate_of\"%'");
     }
     if !tags.is_empty() {
         query.push(" AND t.name IN (");
@@ -947,6 +1031,13 @@ async fn run_actions(
         let status: String = row.get(4);
         let backup: Option<String> = row.try_get(5).ok();
         let tags_col: Option<String> = row.try_get(6).ok();
+        let duplicate_of = serde_json::from_str::<serde_json::Value>(&payload)
+            .ok()
+            .and_then(|v| {
+                v.get("duplicate_of")
+                    .and_then(|d| d.as_str())
+                    .map(|s| s.to_string())
+            });
         let tags_vec: Vec<String> = tags_col
             .unwrap_or_default()
             .split(',')
@@ -968,14 +1059,34 @@ async fn run_actions(
             "status": status,
             "rule": rule,
             "backup_path": backup,
+            "duplicate_of": duplicate_of,
             "tags": tags_vec,
         }));
     }
+    let filtered_fields = if fields.is_empty() {
+        vec![
+            "id".to_string(),
+            "path".to_string(),
+            "kind".to_string(),
+            "status".to_string(),
+            "rule".to_string(),
+            "backup_path".to_string(),
+            "duplicate_of".to_string(),
+            "tags".to_string(),
+            "snippet".to_string(),
+        ]
+    } else {
+        fields.iter().cloned().collect()
+    };
     if json {
-        let filtered = filter_fields(vals, fields);
+        let mut enriched = vals;
+        attach_snippets(&cfg.database.path, &mut enriched).await?;
+        let filtered = filter_fields(enriched, &filtered_fields);
         println!("{}", serde_json::to_string_pretty(&filtered)?);
     } else {
-        let filtered = filter_fields(vals, fields);
+        let mut enriched = vals;
+        attach_snippets(&cfg.database.path, &mut enriched).await?;
+        let filtered = filter_fields(enriched, &filtered_fields);
         for v in &filtered {
             println!("{}", serde_json::to_string(v)?);
         }

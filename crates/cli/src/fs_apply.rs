@@ -5,9 +5,22 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub enum ActionKind {
-    Move { from: PathBuf, to: PathBuf },
-    Rename { from: PathBuf, to: PathBuf },
-    Tag { _path: PathBuf, _tag: String },
+    Move {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Rename {
+        from: PathBuf,
+        to: PathBuf,
+    },
+    Tag {
+        _path: PathBuf,
+        _tag: String,
+    },
+    Dedupe {
+        _path: PathBuf,
+        _duplicate_of: String,
+    },
     Unsupported,
 }
 
@@ -42,6 +55,17 @@ pub fn parse_action(path: &str, kind: &str, payload: &str) -> ActionKind {
                 _tag: tag,
             }
         }
+        "dedupe" => {
+            let dupe = parsed
+                .get("duplicate_of")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            ActionKind::Dedupe {
+                _path: from,
+                _duplicate_of: dupe,
+            }
+        }
         _ => ActionKind::Unsupported,
     }
 }
@@ -68,6 +92,10 @@ pub fn apply_action(
         }
         ActionKind::Tag { .. } => {
             // Tagging handled in apply layer via DB.
+            Ok(None)
+        }
+        ActionKind::Dedupe { .. } => {
+            // Dedupe is advisory; no filesystem mutation.
             Ok(None)
         }
         ActionKind::Unsupported => Ok(None),

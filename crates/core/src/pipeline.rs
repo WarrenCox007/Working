@@ -165,9 +165,21 @@ pub async fn run_with_mode_summary(
                 .await
             {
                 let mut meta = std::collections::HashMap::new();
-                meta.insert("duplicate_of".to_string(), dupe);
+                meta.insert("duplicate_of".to_string(), dupe.clone());
                 let _ = indexer
                     .insert_metadata(&item.path.to_string_lossy(), &meta)
+                    .await;
+
+                // Suggest a dedupe tag action for this file.
+                let payload =
+                    serde_json::json!({ "duplicate_of": dupe.clone(), "rule": "dedupe-detected" });
+                let _ = indexer
+                    .insert_action(crate::suggester::ActionRecord {
+                        file_path: item.path.to_string_lossy().into_owned(),
+                        kind: "dedupe".into(),
+                        payload,
+                        rule: Some("dedupe-detected".into()),
+                    })
                     .await;
             }
         }
@@ -209,6 +221,9 @@ pub async fn run_with_mode_summary(
                         );
                         meta.insert("hash".to_string(), chunk_hash.clone());
                         meta.insert("mtime".to_string(), item.mtime.to_string());
+                        if let Some(h) = item.hash.as_ref() {
+                            meta.insert("file_hash".to_string(), h.clone());
+                        }
                         if let Err(e) = vector_store
                             .upsert(vec![vectorstore::VectorRecord {
                                 id: chunk_hash.clone(),
