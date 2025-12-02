@@ -114,15 +114,12 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -
                             "match": { "any": removed_file_hashes }
                         }));
                     }
-                    if !removed_point_ids.is_empty() {
-                        must.push(serde_json::json!({
-                            "key": "id",
-                            "match": { "any": removed_point_ids }
-                        }));
-                    }
                     let _ = qdrant
                         .delete_by_filter(serde_json::json!({ "must": must }))
                         .await;
+                    if !removed_point_ids.is_empty() {
+                        let _ = qdrant.delete_by_ids(&removed_point_ids).await;
+                    }
                 }
             }
             if cfg!(feature = "keyword-index") {
