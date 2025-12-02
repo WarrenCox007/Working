@@ -135,7 +135,13 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -
                 debounce
             );
             if !removed.is_empty() {
-                let _ = log_audit(&cfg.database.path, &removed, &removed_hashes).await;
+                let _ = log_audit(
+                    &cfg.database.path,
+                    &removed,
+                    &removed_hashes,
+                    &removed_point_ids,
+                )
+                .await;
             }
         }
     }
@@ -212,11 +218,17 @@ async fn collect_hashes(db_path: &str, path: &PathBuf) -> Result<(Vec<String>, O
     Ok((hashes, file_hash))
 }
 
-async fn log_audit(db_path: &str, paths: &[String], hashes: &[String]) -> Result<()> {
+async fn log_audit(
+    db_path: &str,
+    paths: &[String],
+    hashes: &[String],
+    point_ids: &[String],
+) -> Result<()> {
     let pool = storage::connect(db_path).await?;
     let detail = serde_json::json!({
         "paths": paths,
         "hashes": hashes,
+        "vector_ids": point_ids,
     })
     .to_string();
     let _ =
