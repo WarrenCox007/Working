@@ -16,6 +16,7 @@ mod fs_apply;
 mod keyword_index;
 mod paths;
 mod undo;
+mod watch;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -143,6 +144,7 @@ async fn main() -> Result<()> {
         Commands::Undo { ids, backup_path } => {
             run_undo(cfg, ids.as_deref(), backup_path.as_deref()).await
         }
+        Commands::Watch { paths } => run_watch(cfg, paths).await,
     }
 }
 
@@ -293,6 +295,12 @@ enum Commands {
         /// Provide backup path to restore from if not recorded
         #[arg(long)]
         backup_path: Option<String>,
+    },
+    /// Watch for filesystem changes and re-index incrementally
+    Watch {
+        /// Paths to watch (defaults to scan.include)
+        #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = Vec::<String>::new())]
+        paths: Vec<String>,
     },
 }
 
@@ -1194,4 +1202,8 @@ async fn fetch_actions(db_path: &str) -> Result<Vec<serde_json::Value>> {
 async fn run_undo(cfg: AppConfig, ids: Option<&str>, backup_override: Option<&str>) -> Result<()> {
     undo::undo_actions(&cfg.database.path, ids, backup_override).await?;
     Ok(())
+}
+
+async fn run_watch(cfg: AppConfig, paths: Vec<String>) -> Result<()> {
+    watch::watch_paths(cfg, paths).await
 }

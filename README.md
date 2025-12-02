@@ -29,4 +29,5 @@ cargo run -p cli
 ## Notes
 - Undo relies on recorded backups (via `trash_dir` copies/backup_path). OS trash restore is not supported with the current trash crate.
 - Search/actions/apply now support filters: tag filters (`--tags`), keyword index hybrid search (`--keyword-index`), and output field trimming (`--fields path,score,tags,...`) for lighter JSON/text.
-- Duplicates: use `actions --show-duplicates` (or `--duplicates-only`) to list dedupe suggestions with `duplicate_of` and snippets; summaries show duplicate counts.
+- Duplicates: use `actions --show-duplicates` (or `--duplicates-only`) to list dedupe/merge suggestions with `duplicate_of` and snippets; summaries show duplicate counts; merge_duplicate actions can trash or replace a duplicate.
+- Watch mode: `cli watch` monitors paths (defaults to `scan.include`) and re-extracts/re-embeds/re-indexes changed files incrementally, marking the keyword index for refresh.
