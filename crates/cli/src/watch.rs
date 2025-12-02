@@ -1,7 +1,7 @@
 use crate::keyword_index;
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use organizer_core::config::AppConfig;
+use organizer_core::config::{AppConfig, SafetyConfig};
 use organizer_core::pipeline;
 use organizer_core::vectorstore::AsQdrant;
 use sqlx::Row;
@@ -40,6 +40,7 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -
     let mut pending: HashSet<PathBuf> = HashSet::new();
     let mut last_flush = Instant::now();
     let mut processed_total: usize = 0;
+    let safety: SafetyConfig = cfg.safety.clone();
 
     loop {
         match rx.recv_timeout(Duration::from_millis(500)) {
@@ -98,27 +99,29 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -
                 if let Some(qdrant) =
                     organizer_core::pipeline::build_vector_store(&cfg).downcast_qdrant()
                 {
-                    let mut must = vec![serde_json::json!({
-                        "key": "path",
-                        "match": { "any": removed }
-                    })];
-                    if !removed_hashes.is_empty() {
-                        must.push(serde_json::json!({
-                            "key": "hash",
-                            "match": { "any": removed_hashes }
-                        }));
-                    }
-                    if !removed_file_hashes.is_empty() {
-                        must.push(serde_json::json!({
-                            "key": "file_hash",
-                            "match": { "any": removed_file_hashes }
-                        }));
-                    }
-                    let _ = qdrant
-                        .delete_by_filter(serde_json::json!({ "must": must }))
-                        .await;
-                    if !removed_point_ids.is_empty() {
-                        let _ = qdrant.delete_by_ids(&removed_point_ids).await;
+                    if safety.immediate_vector_delete {
+                        let mut must = vec![serde_json::json!({
+                            "key": "path",
+                            "match": { "any": removed }
+                        })];
+                        if !removed_hashes.is_empty() {
+                            must.push(serde_json::json!({
+                                "key": "hash",
+                                "match": { "any": removed_hashes }
+                            }));
+                        }
+                        if !removed_file_hashes.is_empty() {
+                            must.push(serde_json::json!({
+                                "key": "file_hash",
+                                "match": { "any": removed_file_hashes }
+                            }));
+                        }
+                        let _ = qdrant
+                            .delete_by_filter(serde_json::json!({ "must": must }))
+                            .await;
+                        if !removed_point_ids.is_empty() {
+                            let _ = qdrant.delete_by_ids(&removed_point_ids).await;
+                        }
                     }
                 }
             }

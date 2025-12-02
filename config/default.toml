@@ -27,6 +27,7 @@ allow_paths = []
 deny_paths = ["/Windows", "C:\\Windows", "/System"]
 trash_dir = "trash"
 copy_then_delete = false
+immediate_vector_delete = true
 
 [rules]
 path = "rules"

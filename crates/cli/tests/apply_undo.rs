@@ -56,6 +56,7 @@ async fn apply_and_undo_moves_with_backup() {
         deny_paths: vec![],
         trash_dir: Some(temp.path().join("trash").to_string_lossy().into_owned()),
         copy_then_delete: false,
+        immediate_vector_delete: true,
     };
 
     let actions = cli::apply::apply_actions(&db_url, false, None, &safety, "rename")

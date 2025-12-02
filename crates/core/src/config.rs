@@ -55,6 +55,8 @@ pub struct SafetyConfig {
     pub trash_dir: Option<String>,
     #[serde(default)]
     pub copy_then_delete: bool,
+    #[serde(default)]
+    pub immediate_vector_delete: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
