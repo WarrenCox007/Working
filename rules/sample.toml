@@ -1,0 +1,15 @@
+name = "images-to-photos"
+priority = 10
+enabled = true
+
+[condition]
+type = "mime"
+mime = "image/jpeg"
+
+[[actions]]
+type = "move"
+to = "/Photos"
+
+[[actions]]
+type = "tag"
+tag = "photo"

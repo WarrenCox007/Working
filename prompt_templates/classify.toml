@@ -1,0 +1,6 @@
+# Prompt templates for classification
+
+[[templates]]
+name = "classify-file"
+role = "system"
+text = "You are a file classification assistant. Return JSON with label and confidence between 0 and 1."

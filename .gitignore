@@ -1,0 +1,10 @@
+/target
+**/target
+**/.DS_Store
+**/node_modules
+/.idea
+/.vscode
+.env
+.env.local
+/.cargo
+

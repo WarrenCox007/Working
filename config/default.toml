@@ -1,0 +1,32 @@
+[database]
+path = "organizer.db"
+
+[scan]
+include = ["/path/to/scan"]
+exclude = ["/path/to/skip", "/tmp"]
+hash_mode = "fast" # options: none, fast, full
+
+[embeddings]
+provider = "lmstudio"
+model = "text-embedding-3-small"
+batch_size = 16
+
+[vectors]
+provider = "qdrant"
+url = "http://localhost:6333"
+collection = "files"
+
+[classification.thresholds]
+accept = 0.8
+review = 0.5
+
+[safety]
+dry_run = true
+allow_delete = false
+allow_paths = []
+deny_paths = ["/Windows", "C:\\Windows", "/System"]
+trash_dir = "trash"
+copy_then_delete = false
+
+[rules]
+path = "rules"
