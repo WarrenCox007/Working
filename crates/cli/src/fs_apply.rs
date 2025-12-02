@@ -79,7 +79,7 @@ pub fn parse_action(path: &str, kind: &str, payload: &str) -> ActionKind {
             let strategy = parsed
                 .get("strategy")
                 .and_then(|v| v.as_str())
-                .unwrap_or("trash")
+                .unwrap_or("trash_duplicate")
                 .to_string();
             ActionKind::MergeDuplicate {
                 from: from.clone(),
@@ -117,25 +117,47 @@ pub fn apply_action(
             from,
             target,
             strategy,
-        } => match strategy.as_str() {
-            "replace" => apply_action(
-                ActionKind::Move { from, to: target },
-                trash_dir,
-                copy_then_delete,
-                "overwrite",
-            ),
-            _ => {
-                if let Some(trash) = trash_dir {
-                    let backup = backup_to_trash(&from, trash)?;
-                    let _ = fs::remove_file(&from);
-                    Ok(Some(backup))
-                } else {
-                    let _ = fs::remove_file(&from);
-                    Ok(None)
+        } => {
+            let strat = if strategy == "keep_newest" || strategy == "keep_oldest" {
+                choose_strategy_by_mtime(&from, &target, &strategy)
+            } else {
+                strategy
+            };
+            match strat.as_str() {
+                "keep_duplicate" | "replace" => apply_action(
+                    ActionKind::Move { from, to: target },
+                    trash_dir,
+                    copy_then_delete,
+                    "overwrite",
+                ),
+                _ => {
+                    if let Some(trash) = trash_dir {
+                        let backup = backup_to_trash(&from, trash)?;
+                        let _ = fs::remove_file(&from);
+                        Ok(Some(backup))
+                    } else {
+                        let _ = fs::remove_file(&from);
+                        Ok(None)
+                    }
                 }
             }
-        },
+        }
         ActionKind::Unsupported => Ok(None),
+    }
+}
+
+fn choose_strategy_by_mtime(from: &Path, target: &Path, requested: &str) -> String {
+    let from_mtime = from.metadata().ok().and_then(|m| m.modified().ok());
+    let target_mtime = target.metadata().ok().and_then(|m| m.modified().ok());
+    match (from_mtime, target_mtime) {
+        (Some(f), Some(t)) => {
+            if (f > t && requested == "keep_newest") || (f < t && requested == "keep_oldest") {
+                "keep_duplicate".to_string()
+            } else {
+                "keep_original".to_string()
+            }
+        }
+        _ => requested.to_string(),
     }
 }
 

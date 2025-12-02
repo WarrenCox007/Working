@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
         Commands::Undo { ids, backup_path } => {
             run_undo(cfg, ids.as_deref(), backup_path.as_deref()).await
         }
-        Commands::Watch { paths } => run_watch(cfg, paths).await,
+        Commands::Watch { paths, debounce_ms } => run_watch(cfg, paths, debounce_ms).await,
     }
 }
 
@@ -301,6 +301,9 @@ enum Commands {
         /// Paths to watch (defaults to scan.include)
         #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = Vec::<String>::new())]
         paths: Vec<String>,
+        /// Debounce duration in milliseconds
+        #[arg(long, default_value_t = 2000)]
+        debounce_ms: u64,
     },
 }
 
@@ -1204,6 +1207,6 @@ async fn run_undo(cfg: AppConfig, ids: Option<&str>, backup_override: Option<&st
     Ok(())
 }
 
-async fn run_watch(cfg: AppConfig, paths: Vec<String>) -> Result<()> {
-    watch::watch_paths(cfg, paths).await
+async fn run_watch(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -> Result<()> {
+    watch::watch_paths(cfg, paths, debounce_ms).await
 }

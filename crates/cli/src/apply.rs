@@ -150,7 +150,7 @@ pub async fn apply_actions(
                     if let Some(dup) = extract_duplicate_of(&payload) {
                         // Treat merge as removing or replacing duplicate; if strategy is replace, let fs layer move it.
                         match fs_apply::apply_action(
-                            action,
+                            action.clone(),
                             safety.trash_dir.as_deref().map(PathBuf::from).as_deref(),
                             safety.copy_then_delete,
                             conflict,
@@ -168,6 +168,11 @@ pub async fn apply_actions(
                                 let tag_name = format!("duplicate_of:{}", dup);
                                 let _ = sqlx::query("INSERT OR IGNORE INTO tags(name) VALUES (?1)")
                                     .bind(&tag_name)
+                                    .execute(&pool)
+                                    .await;
+                                let _ = copy_tags(&pool, &path, &dup).await;
+                                let _ = sqlx::query("DELETE FROM files WHERE path = ?1")
+                                    .bind(&path)
                                     .execute(&pool)
                                     .await;
                             }
@@ -271,6 +276,28 @@ fn extract_duplicate_of(payload: &str) -> Option<String> {
                     .map(|s| s.to_string())
             })
     })
+}
+
+async fn copy_tags(pool: &sqlx::SqlitePool, from_path: &str, to_path: &str) -> Result<()> {
+    let tags: Vec<String> = sqlx::query_scalar(
+        "SELECT t.name FROM file_tags ft JOIN tags t ON t.id = ft.tag_id WHERE ft.file_id=(SELECT id FROM files WHERE path=?1)",
+    )
+    .bind(from_path)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    for tag in tags {
+        sqlx::query("INSERT OR IGNORE INTO tags(name) VALUES (?1)")
+            .bind(&tag)
+            .execute(pool)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO file_tags(file_id, tag_id, confidence, source) VALUES ((SELECT id FROM files WHERE path = ?1),(SELECT id FROM tags WHERE name = ?2),1.0,'merge')")
+            .bind(to_path)
+            .bind(&tag)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
 }
 
 fn extract_rule(payload: &str) -> Option<String> {

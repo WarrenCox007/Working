@@ -1,14 +1,14 @@
-use crate::keyword_index;
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use organizer_core::config::AppConfig;
 use organizer_core::pipeline;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use storage;
 
-pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>) -> Result<()> {
+pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -> Result<()> {
     let mut watch_list: Vec<PathBuf> = if paths.is_empty() {
         cfg.scan.include.iter().map(|p| PathBuf::from(p)).collect()
     } else {
@@ -21,7 +21,7 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>) -> Result<()> {
     let (tx, rx) = channel();
     let mut watcher: RecommendedWatcher = Watcher::new(
         tx,
-        notify::Config::default().with_poll_interval(Duration::from_secs(2)),
+        notify::Config::default().with_poll_interval(Duration::from_millis(750)),
     )?;
     for p in &watch_list {
         let mode = if p.is_dir() {
@@ -33,27 +33,42 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>) -> Result<()> {
     }
 
     println!("Watching {} path(s)...", watch_list.len());
+    let debounce = Duration::from_millis(debounce_ms.max(200));
+    let mut pending: HashSet<PathBuf> = HashSet::new();
+    let mut last_flush = Instant::now();
+
     loop {
-        match rx.recv() {
+        match rx.recv_timeout(Duration::from_millis(500)) {
             Ok(event) => {
                 if let Ok(ev) = event {
                     for path in ev.paths {
                         if path.is_file() {
-                            if let Err(e) = pipeline::process_file(&cfg, &path).await {
-                                eprintln!("process error for {:?}: {}", path, e);
-                            } else {
-                                // mark dirty for keyword index refresh
-                                let _ = mark_dirty(&cfg.database.path, &path).await;
-                                let _ = keyword_index::enabled::build_index(
-                                    &crate::keyword_index_dir(&cfg.database.path),
-                                    &[],
-                                );
-                            }
+                            pending.insert(path);
                         }
                     }
                 }
             }
-            Err(e) => eprintln!("watch error: {:?}", e),
+            Err(_) => {}
+        }
+
+        if !pending.is_empty() && last_flush.elapsed() >= debounce {
+            let batch: Vec<PathBuf> = pending.drain().collect();
+            last_flush = Instant::now();
+            for path in &batch {
+                if let Err(e) = pipeline::process_file(&cfg, path).await {
+                    eprintln!("process error for {:?}: {}", path, e);
+                } else {
+                    let _ = mark_dirty(&cfg.database.path, path).await;
+                }
+            }
+            if cfg!(feature = "keyword-index") {
+                let _ = crate::refresh_keyword_index_if_dirty(&cfg, None).await;
+            }
+            println!(
+                "Processed batch of {} file(s); next refresh after {:?}",
+                batch.len(),
+                debounce
+            );
         }
     }
 }
