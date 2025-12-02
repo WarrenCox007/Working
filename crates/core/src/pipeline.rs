@@ -85,7 +85,13 @@ pub async fn run_with_mode_summary(
             let classify_res = classifier::classify(
                 classifier::ClassificationInput {
                     text: extracted.snippets.join("\n"),
-                    metadata: serde_json::json!({"mime": extracted.mime, "size": extracted.size}),
+                    metadata: serde_json::json!({
+                        "mime": extracted.mime,
+                        "size": extracted.size,
+                        "ext": item.path.extension().and_then(|s| s.to_str()),
+                        "path": item.path.to_string_lossy(),
+                        "hash": item.hash,
+                    }),
                     provider: None,
                 },
                 &registry,
@@ -153,6 +159,18 @@ pub async fn run_with_mode_summary(
             })
             .await
             .context("index")?;
+        if let Some(h) = item.hash.as_deref() {
+            if let Ok(Some(dupe)) = indexer
+                .detect_duplicate_for_hash(&item.path.to_string_lossy(), h)
+                .await
+            {
+                let mut meta = std::collections::HashMap::new();
+                meta.insert("duplicate_of".to_string(), dupe);
+                let _ = indexer
+                    .insert_metadata(&item.path.to_string_lossy(), &meta)
+                    .await;
+            }
+        }
         let do_embeddings = matches!(
             mode,
             PipelineMode::Classify | PipelineMode::All | PipelineMode::Suggest

@@ -80,6 +80,12 @@ CREATE TABLE IF NOT EXISTS audit (
     FOREIGN KEY(action_id) REFERENCES actions(id) ON DELETE SET NULL
 );
 
+CREATE TABLE IF NOT EXISTS dirty (
+    path TEXT PRIMARY KEY,
+    reason TEXT,
+    updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+);
+
 CREATE INDEX IF NOT EXISTS idx_files_mtime ON files(mtime);
 CREATE INDEX IF NOT EXISTS idx_metadata_file_key ON metadata(file_id, key);
 CREATE INDEX IF NOT EXISTS idx_chunks_file ON chunks(file_id);

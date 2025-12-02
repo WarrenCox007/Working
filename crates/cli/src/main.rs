@@ -311,6 +311,17 @@ async fn run_search(
     let registry = pipeline::build_registry(&cfg);
     let vector_store = pipeline::build_vector_store(&cfg);
     let tag_filter = if tags.is_empty() { None } else { Some(tags) };
+    let fields = if fields.is_empty() {
+        vec![
+            "path".to_string(),
+            "score".to_string(),
+            "tags".to_string(),
+            "snippet".to_string(),
+            "payload".to_string(),
+        ]
+    } else {
+        fields
+    };
     let tagged_paths: Option<HashSet<String>> = if let Some(t) = &tag_filter {
         Some(fetch_paths_with_tags(&cfg.database.path, t).await?)
     } else {
@@ -363,6 +374,7 @@ async fn run_search(
                 }
             }
             let fallback = if use_keyword_index {
+                refresh_keyword_index_if_dirty(&cfg, tag_filter.as_deref()).await?;
                 keyword_index_search(
                     &cfg,
                     &query,
@@ -396,6 +408,7 @@ async fn run_search(
             }
         }
         attach_tags(&cfg.database.path, &mut results_json).await?;
+        attach_snippets(&cfg.database.path, &mut results_json).await?;
         let filtered = filter_fields(results_json, &fields);
         let out = serde_json::to_string_pretty(&filtered)?;
         println!("{}", out);
@@ -405,6 +418,7 @@ async fn run_search(
     // Fallback: simple DB LIKE search if vector store is unavailable.
     eprintln!("Vector store not configured; using fallback path search.");
     let mut results = if use_keyword_index {
+        refresh_keyword_index_if_dirty(&cfg, tag_filter.as_deref()).await?;
         keyword_index_search(
             &cfg,
             &query,
@@ -437,6 +451,7 @@ async fn run_search(
         });
     }
     attach_tags(&cfg.database.path, &mut results).await?;
+    attach_snippets(&cfg.database.path, &mut results).await?;
     let filtered = filter_fields(results, &fields);
     println!("{}", serde_json::to_string_pretty(&filtered)?);
     Ok(())
@@ -554,6 +569,61 @@ async fn attach_tags(db_path: &str, results: &mut Vec<serde_json::Value>) -> Res
                 if r.get("payload").is_none() || !r.get("payload").unwrap().is_object() {
                     if let Some(obj) = r.as_object_mut() {
                         obj.insert("tags".into(), tags_val);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn fetch_snippets_for_paths(
+    db_path: &str,
+    paths: &[String],
+) -> Result<HashMap<String, String>> {
+    if paths.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let pool = storage::connect(db_path).await?;
+    let mut qb = QueryBuilder::new("SELECT files.path, chunks.text_preview FROM files JOIN chunks ON chunks.file_id = files.id WHERE files.path IN (");
+    let mut separated = qb.separated(", ");
+    for p in paths {
+        separated.push_bind(p);
+    }
+    separated.push_unseparated(") ORDER BY chunks.start");
+    let rows = qb.build().fetch_all(&pool).await?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let path: String = row.get(0);
+        let snippet: Option<String> = row.try_get(1).ok();
+        if let Some(s) = snippet {
+            map.entry(path).or_insert(s);
+        }
+    }
+    Ok(map)
+}
+
+async fn attach_snippets(db_path: &str, results: &mut Vec<serde_json::Value>) -> Result<()> {
+    let paths: Vec<String> = results.iter().filter_map(|r| extract_path(r)).collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let snippets = fetch_snippets_for_paths(db_path, &paths).await?;
+    for r in results.iter_mut() {
+        if let Some(path) = extract_path(r) {
+            if let Some(snippet) = snippets.get(&path) {
+                let snippet_val = serde_json::Value::String(snippet.clone());
+                if let Some(payload) = r.get_mut("payload") {
+                    if payload.is_object() {
+                        payload
+                            .as_object_mut()
+                            .unwrap()
+                            .insert("snippet".into(), snippet_val.clone());
+                    }
+                }
+                if r.get("payload").is_none() || !r.get("payload").unwrap().is_object() {
+                    if let Some(obj) = r.as_object_mut() {
+                        obj.insert("snippet".into(), snippet_val);
                     }
                 }
             }
@@ -712,6 +782,33 @@ async fn keyword_index_search(
     }
     let hits = keyword_index::enabled::search(&dir, query, topk as usize).unwrap_or_default();
     enrich_paths(&cfg.database.path, &hits, path_prefix, mime, after, before).await
+}
+
+async fn refresh_keyword_index_if_dirty(cfg: &AppConfig, tags: Option<&[String]>) -> Result<()> {
+    if !cfg!(feature = "keyword-index") {
+        return Ok(());
+    }
+    let pool = storage::connect(&cfg.database.path).await?;
+    let count: i64 = sqlx::query("SELECT COUNT(1) FROM dirty")
+        .fetch_one(&pool)
+        .await?
+        .get(0);
+    if count == 0 {
+        return Ok(());
+    }
+    let dir = keyword_index_dir(&cfg.database.path);
+    let docs = keyword_search(&cfg.database.path, "", None, None, None, None, tags)
+        .await?
+        .into_iter()
+        .filter_map(|v| {
+            let path = v.get("path")?.as_str()?;
+            let mime_text = v.get("mime").and_then(|m| m.as_str()).unwrap_or("");
+            Some((path.to_string(), format!("{} {}", path, mime_text)))
+        })
+        .collect::<Vec<_>>();
+    let _ = keyword_index::enabled::build_index(&dir, &docs);
+    let _ = sqlx::query("DELETE FROM dirty").execute(&pool).await;
+    Ok(())
 }
 
 fn build_qdrant_filter(

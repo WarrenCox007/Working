@@ -26,6 +26,10 @@ async fn apply_and_undo_moves_with_backup() {
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::query("CREATE TABLE IF NOT EXISTS dirty (path TEXT PRIMARY KEY, reason TEXT, updated_at INTEGER DEFAULT 0)")
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("CREATE TABLE IF NOT EXISTS actions (id INTEGER PRIMARY KEY AUTOINCREMENT, file_id INTEGER NOT NULL, kind TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'planned', created_at INTEGER DEFAULT 0, executed_at INTEGER, undo_token TEXT, backup_path TEXT)")
         .execute(&pool)
         .await

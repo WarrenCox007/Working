@@ -5,7 +5,7 @@ pub mod enabled {
     use tantivy::collector::TopDocs;
     use tantivy::doc;
     use tantivy::schema::{Schema, STORED, TEXT};
-    use tantivy::{Index, IndexWriter, ReloadPolicy};
+    use tantivy::{Index, IndexWriter, ReloadPolicy, Term};
 
     pub fn build_index(path: &Path, docs: &[(String, String)]) -> Result<()> {
         std::fs::create_dir_all(path)?;
@@ -27,6 +27,25 @@ pub mod enabled {
         // Reset before refresh to keep the index in sync with the DB snapshot.
         writer.delete_all();
         for (p, t) in docs {
+            writer.add_document(doc!(path_field=>p.as_str(), text_field=>t.as_str()));
+        }
+        writer.commit()?;
+        index.directory().sync_directory()?;
+        Ok(())
+    }
+
+    pub fn upsert_docs(path: &Path, docs: &[(String, String)]) -> Result<()> {
+        let index = Index::open_in_dir(path)?;
+        let schema = index.schema();
+        let path_field = schema
+            .get_field("path")
+            .ok_or_else(|| anyhow!("path field missing in index schema"))?;
+        let text_field = schema
+            .get_field("text")
+            .ok_or_else(|| anyhow!("text field missing in index schema"))?;
+        let mut writer: IndexWriter = index.writer(50_000_000)?;
+        for (p, t) in docs {
+            writer.delete_term(Term::from_field_text(path_field, p));
             writer.add_document(doc!(path_field=>p.as_str(), text_field=>t.as_str()));
         }
         writer.commit()?;

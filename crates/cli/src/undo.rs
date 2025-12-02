@@ -53,6 +53,10 @@ pub async fn undo_actions(
                 .bind(id)
                 .execute(&pool)
                 .await?;
+            let _ = sqlx::query("INSERT OR REPLACE INTO dirty(path, reason, updated_at) VALUES (?1,'undo', strftime('%s','now'))")
+                .bind(path)
+                .execute(&pool)
+                .await;
         }
     }
 

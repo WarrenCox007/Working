@@ -1,0 +1,15 @@
+name = "archives-to-inbox"
+priority = 50
+enabled = true
+
+[condition]
+type = "extension"
+ext = "zip"
+
+[[actions]]
+type = "move"
+to = "/Archives"
+
+[[actions]]
+type = "tag"
+tag = "archive"

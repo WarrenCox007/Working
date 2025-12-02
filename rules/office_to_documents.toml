@@ -1,0 +1,15 @@
+name = "office-to-documents"
+priority = 30
+enabled = true
+
+[condition]
+type = "extension"
+ext = "docx"
+
+[[actions]]
+type = "move"
+to = "/Documents/Office"
+
+[[actions]]
+type = "tag"
+tag = "office"

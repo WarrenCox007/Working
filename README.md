@@ -28,3 +28,4 @@ cargo run -p cli
 
 ## Notes
 - Undo relies on recorded backups (via `trash_dir` copies/backup_path). OS trash restore is not supported with the current trash crate.
+- Search/actions/apply now support filters: tag filters (`--tags`), keyword index hybrid search (`--keyword-index`), and output field trimming (`--fields path,score,tags,...`) for lighter JSON/text.

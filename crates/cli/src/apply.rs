@@ -20,6 +20,12 @@ pub struct ActionView {
     pub backup: Option<String>,
 }
 
+fn extract_dest(payload: &str) -> Option<String> {
+    serde_json::from_str::<Value>(payload)
+        .ok()
+        .and_then(|v| v.get("to").and_then(|t| t.as_str()).map(|s| s.to_string()))
+}
+
 pub async fn apply_actions(
     db_path: &str,
     dry_run: bool,
@@ -59,6 +65,10 @@ pub async fn apply_actions(
         let mut error = None;
         let mut backup_path: Option<String> = None;
         let rule = extract_rule(&payload);
+        let mut dirty_paths: Vec<String> = vec![path.clone()];
+        if let Some(dest) = extract_dest(&payload) {
+            dirty_paths.push(dest);
+        }
 
         if !dry_run {
             // Allow/deny enforcement
@@ -145,6 +155,13 @@ pub async fn apply_actions(
                         }
                     }
                 }
+            }
+            // mark dirty for downstream indexing
+            for d in dirty_paths {
+                let _ = sqlx::query("INSERT OR REPLACE INTO dirty(path, reason, updated_at) VALUES (?1,'apply', strftime('%s','now'))")
+                    .bind(d)
+                    .execute(&pool)
+                    .await;
             }
         }
 

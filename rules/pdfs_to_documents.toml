@@ -1,0 +1,15 @@
+name = "pdfs-to-documents"
+priority = 20
+enabled = true
+
+[condition]
+type = "extension"
+ext = "pdf"
+
+[[actions]]
+type = "move"
+to = "/Documents/PDFs"
+
+[[actions]]
+type = "tag"
+tag = "pdf"

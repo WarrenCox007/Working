@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::{Row, SqlitePool};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -78,6 +78,23 @@ impl Indexer {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn detect_duplicate_for_hash(
+        &self,
+        current_path: &str,
+        hash: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let row = sqlx::query(
+            r#"
+            SELECT path FROM files WHERE hash = ?1 AND path != ?2 LIMIT 1
+            "#,
+        )
+        .bind(hash)
+        .bind(current_path)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|r| r.get::<String, _>(0)))
     }
 
     pub async fn insert_action(
