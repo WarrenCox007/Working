@@ -175,6 +175,10 @@ pub async fn apply_actions(
                                     .bind(&path)
                                     .execute(&pool)
                                     .await;
+                                let _ = sqlx::query("INSERT INTO audit(action_id, event, detail) VALUES (?1,'merge_duplicate','executed')")
+                                    .bind(id)
+                                    .execute(&pool)
+                                    .await;
                             }
                             Err(e) => {
                                 error = Some(e.to_string());

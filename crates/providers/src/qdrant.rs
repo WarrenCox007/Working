@@ -94,6 +94,35 @@ impl QdrantClient {
         }
         Ok(())
     }
+
+    pub async fn delete_by_filter(&self, filter: serde_json::Value) -> Result<(), ProviderError> {
+        #[derive(Serialize)]
+        struct DeletePoints {
+            filter: serde_json::Value,
+        }
+        let url = format!(
+            "{}/collections/{}/points/delete",
+            self.cfg.url, self.cfg.collection
+        );
+        let body = DeletePoints { filter };
+        let mut builder = self.client.post(url).json(&body);
+        if let Some(key) = &self.cfg.api_key {
+            builder = builder.header("api-key", key);
+        }
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.bytes().await.unwrap_or(Bytes::from_static(b""));
+            return Err(ProviderError::RequestFailed(format!(
+                "status {} body {:?}",
+                status, body
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize)]
