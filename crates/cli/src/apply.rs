@@ -121,6 +121,73 @@ pub async fn apply_actions(
                             .await?;
                     }
                 }
+                "dedupe" => {
+                    if let Some(dup_path) = extract_duplicate_of(&payload) {
+                        let tag_name = format!("duplicate_of:{}", dup_path);
+                        sqlx::query("INSERT OR IGNORE INTO tags(name) VALUES (?1)")
+                            .bind(&tag_name)
+                            .execute(&pool)
+                            .await?;
+                        sqlx::query("INSERT OR IGNORE INTO file_tags(file_id, tag_id, confidence, source) VALUES ((SELECT id FROM files WHERE path = ?1),(SELECT id FROM tags WHERE name = ?2),1.0,'dedupe')")
+                            .bind(&path)
+                            .bind(&tag_name)
+                            .execute(&pool)
+                            .await?;
+                        sqlx::query("UPDATE actions SET status='executed', executed_at=strftime('%s','now') WHERE id = ?1")
+                            .bind(id)
+                            .execute(&pool)
+                            .await?;
+                        status = "executed".to_string();
+                    } else {
+                        error = Some("invalid duplicate_of payload".to_string());
+                        sqlx::query("UPDATE actions SET status='error' WHERE id = ?1")
+                            .bind(id)
+                            .execute(&pool)
+                            .await?;
+                    }
+                }
+                "merge_duplicate" => {
+                    if let Some(dup) = extract_duplicate_of(&payload) {
+                        // Treat merge as removing or replacing duplicate; if strategy is replace, let fs layer move it.
+                        match fs_apply::apply_action(
+                            action,
+                            safety.trash_dir.as_deref().map(PathBuf::from).as_deref(),
+                            safety.copy_then_delete,
+                            conflict,
+                        ) {
+                            Ok(bp) => {
+                                backup_path = bp.map(|p| p.to_string_lossy().into_owned());
+                                sqlx::query("UPDATE actions SET status='executed', executed_at=strftime('%s','now'), backup_path=?2 WHERE id = ?1")
+                                    .bind(id)
+                                    .bind(backup_path.clone())
+                                    .execute(&pool)
+                                    .await?;
+                                status = "executed".to_string();
+                                success += 1;
+                                // Tag the surviving file with duplicate_of for audit
+                                let tag_name = format!("duplicate_of:{}", dup);
+                                let _ = sqlx::query("INSERT OR IGNORE INTO tags(name) VALUES (?1)")
+                                    .bind(&tag_name)
+                                    .execute(&pool)
+                                    .await;
+                            }
+                            Err(e) => {
+                                error = Some(e.to_string());
+                                sqlx::query("UPDATE actions SET status='error' WHERE id = ?1")
+                                    .bind(id)
+                                    .execute(&pool)
+                                    .await?;
+                                failed += 1;
+                            }
+                        }
+                    } else {
+                        error = Some("invalid duplicate_of payload".to_string());
+                        sqlx::query("UPDATE actions SET status='error' WHERE id = ?1")
+                            .bind(id)
+                            .execute(&pool)
+                            .await?;
+                    }
+                }
                 _ => {
                     let trash_dir = safety.trash_dir.as_ref().map(|p| PathBuf::from(p));
                     match fs_apply::apply_action(
@@ -190,6 +257,20 @@ fn extract_tag(payload: &str) -> Option<String> {
     serde_json::from_str::<Value>(payload)
         .ok()
         .and_then(|v| v.get("tag").and_then(|t| t.as_str()).map(|s| s.to_string()))
+}
+
+fn extract_duplicate_of(payload: &str) -> Option<String> {
+    serde_json::from_str::<Value>(payload).ok().and_then(|v| {
+        v.get("duplicate_of")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                v.get("payload")
+                    .and_then(|p| p.get("duplicate_of"))
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+            })
+    })
 }
 
 fn extract_rule(payload: &str) -> Option<String> {

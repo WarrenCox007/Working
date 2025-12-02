@@ -8,6 +8,7 @@ pub enum SuggestedAction {
     Tag { path: PathBuf, tag: String },
     Rename { from: PathBuf, to: PathBuf },
     Dedupe { path: PathBuf, duplicate_of: String },
+    MergeDuplicate { path: PathBuf, duplicate_of: String },
     Noop,
 }
 
@@ -94,6 +95,12 @@ impl From<SuggestedAction> for ActionRecord {
             SuggestedAction::Dedupe { path, duplicate_of } => ActionRecord {
                 file_path: path.to_string_lossy().into_owned(),
                 kind: "dedupe".into(),
+                payload: serde_json::json!({ "duplicate_of": duplicate_of }),
+                rule: None,
+            },
+            SuggestedAction::MergeDuplicate { path, duplicate_of } => ActionRecord {
+                file_path: path.to_string_lossy().into_owned(),
+                kind: "merge_duplicate".into(),
                 payload: serde_json::json!({ "duplicate_of": duplicate_of }),
                 rule: None,
             },

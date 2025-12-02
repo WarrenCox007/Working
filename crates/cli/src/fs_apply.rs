@@ -21,6 +21,11 @@ pub enum ActionKind {
         _path: PathBuf,
         _duplicate_of: String,
     },
+    MergeDuplicate {
+        from: PathBuf,
+        target: PathBuf,
+        strategy: String,
+    },
     Unsupported,
 }
 
@@ -66,6 +71,22 @@ pub fn parse_action(path: &str, kind: &str, payload: &str) -> ActionKind {
                 _duplicate_of: dupe,
             }
         }
+        "merge_duplicate" => {
+            let dupe = parsed
+                .get("duplicate_of")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let strategy = parsed
+                .get("strategy")
+                .and_then(|v| v.as_str())
+                .unwrap_or("trash")
+                .to_string();
+            ActionKind::MergeDuplicate {
+                from: from.clone(),
+                target: PathBuf::from(dupe),
+                strategy,
+            }
+        }
         _ => ActionKind::Unsupported,
     }
 }
@@ -90,14 +111,30 @@ pub fn apply_action(
             let backup = apply_move(from, target, trash_dir, copy_then_delete)?;
             Ok(backup)
         }
-        ActionKind::Tag { .. } => {
-            // Tagging handled in apply layer via DB.
-            Ok(None)
-        }
-        ActionKind::Dedupe { .. } => {
-            // Dedupe is advisory; no filesystem mutation.
-            Ok(None)
-        }
+        ActionKind::Tag { .. } => Ok(None),
+        ActionKind::Dedupe { .. } => Ok(None),
+        ActionKind::MergeDuplicate {
+            from,
+            target,
+            strategy,
+        } => match strategy.as_str() {
+            "replace" => apply_action(
+                ActionKind::Move { from, to: target },
+                trash_dir,
+                copy_then_delete,
+                "overwrite",
+            ),
+            _ => {
+                if let Some(trash) = trash_dir {
+                    let backup = backup_to_trash(&from, trash)?;
+                    let _ = fs::remove_file(&from);
+                    Ok(Some(backup))
+                } else {
+                    let _ = fs::remove_file(&from);
+                    Ok(None)
+                }
+            }
+        },
         ActionKind::Unsupported => Ok(None),
     }
 }

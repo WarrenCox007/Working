@@ -177,7 +177,19 @@ pub async fn run_with_mode_summary(
                     .insert_action(crate::suggester::ActionRecord {
                         file_path: item.path.to_string_lossy().into_owned(),
                         kind: "dedupe".into(),
-                        payload,
+                        payload: serde_json::json!({ "duplicate_of": dupe.clone() }),
+                        rule: Some("dedupe-detected".into()),
+                    })
+                    .await;
+                let _ = indexer
+                    .insert_action(crate::suggester::ActionRecord {
+                        file_path: item.path.to_string_lossy().into_owned(),
+                        kind: "merge_duplicate".into(),
+                        payload: serde_json::json!({
+                            "duplicate_of": dupe.clone(),
+                            "strategy": "trash",
+                            "rule": "dedupe-detected"
+                        }),
                         rule: Some("dedupe-detected".into()),
                     })
                     .await;
@@ -323,4 +335,117 @@ pub fn build_vector_store(config: &crate::config::AppConfig) -> Box<dyn VectorSt
         }
         _ => Box::new(vectorstore::NoopVectorStore),
     }
+}
+
+pub async fn process_file(
+    config: &crate::config::AppConfig,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let pool = connect(&config.database.path).await?;
+    migrate(&pool).await?;
+    let indexer = indexer::Indexer::new(pool.clone());
+    let vector_store = build_vector_store(config);
+    let registry = build_registry(config);
+
+    let meta = std::fs::metadata(path)?;
+    let size = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let contents = std::fs::read(path).unwrap_or_default();
+    let hash = blake3::hash(&contents).to_hex().to_string();
+    let extracted = extractor::extract(path.to_path_buf()).await?;
+
+    indexer
+        .upsert(indexer::IndexRecord {
+            path: path.to_path_buf(),
+            size,
+            mtime,
+            hash: Some(hash.clone()),
+            mime: extracted.mime.clone(),
+            ext: path
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s.to_string()),
+        })
+        .await?;
+    if let Ok(Some(dupe)) = indexer
+        .detect_duplicate_for_hash(&path.to_string_lossy(), &hash)
+        .await
+    {
+        let mut meta = std::collections::HashMap::new();
+        meta.insert("duplicate_of".to_string(), dupe.clone());
+        let _ = indexer
+            .insert_metadata(&path.to_string_lossy(), &meta)
+            .await;
+        let payload = serde_json::json!({
+            "duplicate_of": dupe.clone(),
+            "rule": "dedupe-detected",
+            "strategy": "trash"
+        });
+        let _ = indexer
+            .insert_action(crate::suggester::ActionRecord {
+                file_path: path.to_string_lossy().into_owned(),
+                kind: "merge_duplicate".into(),
+                payload,
+                rule: Some("dedupe-detected".into()),
+            })
+            .await;
+    }
+
+    for chunk in extracted.chunks {
+        let chunk_hash = blake3::hash(chunk.text.as_bytes()).to_hex().to_string();
+        indexer
+            .insert_chunk(
+                &path.to_string_lossy(),
+                indexer::ChunkRecord {
+                    file_id: path.to_string_lossy().into_owned(),
+                    start: chunk.start as i64,
+                    end: chunk.end as i64,
+                    text_preview: Some(chunk.text.clone()),
+                    hash: Some(chunk_hash.clone()),
+                },
+            )
+            .await?;
+        if let Ok(EmbeddingResult { vectors }) = embeddings::embed(
+            embeddings::EmbeddingRequest {
+                texts: vec![chunk.text.clone()],
+                provider: Some(config.embeddings.provider.clone()),
+            },
+            &registry,
+        )
+        .await
+        {
+            if let Some(vec) = vectors.into_iter().next() {
+                let mut meta = std::collections::HashMap::new();
+                meta.insert("path".to_string(), path.to_string_lossy().into_owned());
+                meta.insert(
+                    "mime".to_string(),
+                    extracted.mime.clone().unwrap_or_default(),
+                );
+                meta.insert("hash".to_string(), chunk_hash.clone());
+                meta.insert("mtime".to_string(), mtime.to_string());
+                meta.insert("file_hash".to_string(), hash.clone());
+                let _ = vector_store
+                    .upsert(vec![vectorstore::VectorRecord {
+                        id: chunk_hash.clone(),
+                        vector: vec,
+                        metadata: meta,
+                    }])
+                    .await;
+            }
+        }
+    }
+
+    if let Some(exif) = extracted.exif.as_ref() {
+        let _ = indexer.insert_metadata(&path.to_string_lossy(), exif).await;
+    }
+    let _ = sqlx::query("INSERT OR REPLACE INTO dirty(path, reason, updated_at) VALUES (?1,'watch', strftime('%s','now'))")
+        .bind(path.to_string_lossy())
+        .execute(&pool)
+        .await;
+    Ok(())
 }

@@ -29,7 +29,19 @@ async fn main() -> Result<()> {
         Commands::Classify { json } => run_pipeline(cfg, PipelineMode::Classify, json).await,
         Commands::Suggest { json, list, tags } => {
             if list {
-                run_actions(cfg, "planned", None, None, false, false, &tags, &[], json).await
+                run_actions(
+                    cfg,
+                    "planned",
+                    None,
+                    None,
+                    false,
+                    false,
+                    &tags,
+                    &[],
+                    false,
+                    json,
+                )
+                .await
             } else {
                 run_pipeline(cfg, PipelineMode::Suggest, json).await
             }
@@ -96,19 +108,34 @@ async fn main() -> Result<()> {
             kind,
             has_backup,
             duplicates_only,
+            show_duplicates,
             tags,
             fields,
+            summary,
             json,
         } => {
+            let dedupe_default_fields = vec![
+                "id".to_string(),
+                "path".to_string(),
+                "kind".to_string(),
+                "status".to_string(),
+                "duplicate_of".to_string(),
+                "snippet".to_string(),
+            ];
+            let mut effective_fields = fields;
+            if show_duplicates && effective_fields.is_empty() {
+                effective_fields = dedupe_default_fields;
+            }
             run_actions(
                 cfg,
                 &status,
                 rule.as_deref(),
                 kind.as_deref(),
                 has_backup,
-                duplicates_only,
+                duplicates_only || show_duplicates,
                 &tags,
-                &fields,
+                &effective_fields,
+                summary,
                 json,
             )
             .await
@@ -242,6 +269,12 @@ enum Commands {
         /// Show only duplicate-related actions
         #[arg(long, default_value_t = false)]
         duplicates_only: bool,
+        /// Convenience flag: show duplicates with id/path/kind/status/duplicate_of/snippet
+        #[arg(long, default_value_t = false)]
+        show_duplicates: bool,
+        /// Print a brief summary (non-JSON)
+        #[arg(long, default_value_t = false)]
+        summary: bool,
         /// Filter by tag names (comma-separated)
         #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = Vec::<String>::new())]
         tags: Vec<String>,
@@ -955,6 +988,10 @@ async fn run_apply(
     ];
     let filtered_fields = fields.clone().unwrap_or_else(|| default_fields.clone());
     vals = filter_fields(vals, &filtered_fields);
+    let duplicate_count = vals
+        .iter()
+        .filter(|v| v.get("duplicate_of").and_then(|d| d.as_str()).is_some())
+        .count();
     if json {
         println!("{}", serde_json::to_string_pretty(&vals)?);
     } else if summary {
@@ -968,8 +1005,8 @@ async fn run_apply(
             .filter(|v| v.get("status").and_then(|s| s.as_str()) == Some("error"))
             .count();
         println!(
-            "apply summary: processed={}, executed={}, failed={}, dry_run={}",
-            processed, executed, failed, dry_run
+            "apply summary: processed={}, executed={}, failed={}, duplicates={}, dry_run={}",
+            processed, executed, failed, duplicate_count, dry_run
         );
     } else {
         println!("processed {} actions", vals.len());
@@ -991,6 +1028,7 @@ async fn run_actions(
     duplicates_only: bool,
     tags: &[String],
     fields: &[String],
+    summary: bool,
     json: bool,
 ) -> Result<()> {
     let pool = storage::connect(&cfg.database.path).await?;
@@ -1083,6 +1121,24 @@ async fn run_actions(
         attach_snippets(&cfg.database.path, &mut enriched).await?;
         let filtered = filter_fields(enriched, &filtered_fields);
         println!("{}", serde_json::to_string_pretty(&filtered)?);
+    } else if summary {
+        let total = vals.len();
+        let dupes = vals
+            .iter()
+            .filter(|v| v.get("duplicate_of").and_then(|d| d.as_str()).is_some())
+            .count();
+        let executed = vals
+            .iter()
+            .filter(|v| v.get("status").and_then(|s| s.as_str()) == Some("executed"))
+            .count();
+        let errors = vals
+            .iter()
+            .filter(|v| v.get("status").and_then(|s| s.as_str()) == Some("error"))
+            .count();
+        println!(
+            "actions summary: total={}, executed={}, errors={}, duplicates={}, status={}",
+            total, executed, errors, dupes, status
+        );
     } else {
         let mut enriched = vals;
         attach_snippets(&cfg.database.path, &mut enriched).await?;

@@ -19,6 +19,7 @@ trash = "3.0.1"
 tempfile = { version = "3", optional = true }
 chrono.workspace = true
 tantivy = { version = "0.21", optional = true, default-features = false, features = ["mmap"] }
+notify = "6"
 
 [dev-dependencies]
 tempfile = "3"
