@@ -134,6 +134,9 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -
                 processed_total,
                 debounce
             );
+            if !removed.is_empty() {
+                let _ = log_audit(&cfg.database.path, &removed, &removed_hashes).await;
+            }
         }
     }
 }
@@ -207,4 +210,19 @@ async fn collect_hashes(db_path: &str, path: &PathBuf) -> Result<(Vec<String>, O
         }
     }
     Ok((hashes, file_hash))
+}
+
+async fn log_audit(db_path: &str, paths: &[String], hashes: &[String]) -> Result<()> {
+    let pool = storage::connect(db_path).await?;
+    let detail = serde_json::json!({
+        "paths": paths,
+        "hashes": hashes,
+    })
+    .to_string();
+    let _ =
+        sqlx::query("INSERT INTO audit(action_id, event, detail) VALUES(NULL,'watch_purge',?1)")
+            .bind(detail)
+            .execute(&pool)
+            .await?;
+    Ok(())
 }
