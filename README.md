@@ -31,3 +31,10 @@ cargo run -p cli
 - Search/actions/apply now support filters: tag filters (`--tags`), keyword index hybrid search (`--keyword-index`), and output field trimming (`--fields path,score,tags,...`) for lighter JSON/text.
 - Duplicates: use `actions --show-duplicates` (or `--duplicates-only`) to list dedupe/merge suggestions with `duplicate_of` and snippets; summaries show duplicate counts; merge_duplicate actions can trash or replace a duplicate.
 - Watch mode: `cli watch` monitors paths (defaults to `scan.include`) and re-extracts/re-embeds/re-indexes changed files incrementally, marking the keyword index for refresh. Deletes purge DB rows, keyword index docs, and vectors (controlled by `safety.immediate_vector_delete`), and log purge audits.
+
+## Quick usage examples
+- Run pipeline: `cargo run -p cli -- scan` then `... classify` then `... suggest`
+- List planned actions: `cargo run -p cli -- suggest --list --fields id,path,kind,duplicate_of,snippet`
+- Dedupe review: `cargo run -p cli -- actions --show-duplicates --summary` then apply a specific merge: `cargo run -p cli -- apply --ids 5 --fields id,path,status,backup`
+- Search with filters: `cargo run -p cli -- search "invoice" --hybrid --tags finance --fields path,score,duplicate_of,snippet`
+- Watch for changes: `cargo run -p cli -- watch --debounce-ms 2000`

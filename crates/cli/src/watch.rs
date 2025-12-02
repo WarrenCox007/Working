@@ -41,6 +41,7 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -
     let mut last_flush = Instant::now();
     let mut processed_total: usize = 0;
     let safety: SafetyConfig = cfg.safety.clone();
+    let mut attempted_vectors_last: usize = 0;
 
     loop {
         match rx.recv_timeout(Duration::from_millis(500)) {
@@ -100,6 +101,11 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -
                     organizer_core::pipeline::build_vector_store(&cfg).downcast_qdrant()
                 {
                     if safety.immediate_vector_delete {
+                        // record attempted counts
+                        attempted_vectors_last = removed.len()
+                            + removed_hashes.len()
+                            + removed_file_hashes.len()
+                            + removed_point_ids.len();
                         let mut must = vec![serde_json::json!({
                             "key": "path",
                             "match": { "any": removed }
@@ -135,18 +141,15 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -
                 debounce
             );
             if !removed.is_empty() {
-                let attempted_vectors = removed.len()
-                    + removed_hashes.len()
-                    + removed_file_hashes.len()
-                    + removed_point_ids.len();
-                let attempted_docs = removed.len();
+                let attempted_vectors = attempted_vectors_last as i64;
+                let attempted_docs = removed.len() as i64;
                 let _ = log_audit(
                     &cfg.database.path,
                     &removed,
                     &removed_hashes,
                     &removed_point_ids,
-                    attempted_docs as i64,
-                    attempted_vectors as i64,
+                    attempted_docs,
+                    attempted_vectors,
                 )
                 .await;
             }
