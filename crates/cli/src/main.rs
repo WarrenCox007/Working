@@ -144,7 +144,11 @@ async fn main() -> Result<()> {
         Commands::Undo { ids, backup_path } => {
             run_undo(cfg, ids.as_deref(), backup_path.as_deref()).await
         }
-        Commands::Watch { paths, debounce_ms } => run_watch(cfg, paths, debounce_ms).await,
+        Commands::Watch {
+            paths,
+            debounce_ms,
+            quiet,
+        } => run_watch(cfg, paths, debounce_ms, quiet).await,
     }
 }
 
@@ -304,6 +308,9 @@ enum Commands {
         /// Debounce duration in milliseconds
         #[arg(long, default_value_t = 2000)]
         debounce_ms: u64,
+        /// Suppress per-batch logs (errors still shown)
+        #[arg(long, default_value_t = false)]
+        quiet: bool,
     },
 }
 
@@ -1207,6 +1214,11 @@ async fn run_undo(cfg: AppConfig, ids: Option<&str>, backup_override: Option<&st
     Ok(())
 }
 
-async fn run_watch(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -> Result<()> {
-    watch::watch_paths(cfg, paths, debounce_ms).await
+async fn run_watch(
+    cfg: AppConfig,
+    paths: Vec<String>,
+    debounce_ms: u64,
+    quiet: bool,
+) -> Result<()> {
+    watch::watch_paths(cfg, paths, debounce_ms, quiet).await
 }

@@ -11,7 +11,12 @@ use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 use storage;
 
-pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -> Result<()> {
+pub async fn watch_paths(
+    cfg: AppConfig,
+    paths: Vec<String>,
+    debounce_ms: u64,
+    quiet: bool,
+) -> Result<()> {
     let mut watch_list: Vec<PathBuf> = if paths.is_empty() {
         cfg.scan.include.iter().map(|p| PathBuf::from(p)).collect()
     } else {
@@ -35,7 +40,9 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -
         watcher.watch(p, mode)?;
     }
 
-    println!("Watching {} path(s)...", watch_list.len());
+    if !quiet {
+        println!("Watching {} path(s)...", watch_list.len());
+    }
     let debounce = Duration::from_millis(debounce_ms.max(200));
     let mut pending: HashSet<PathBuf> = HashSet::new();
     let mut last_flush = Instant::now();
@@ -134,12 +141,14 @@ pub async fn watch_paths(cfg: AppConfig, paths: Vec<String>, debounce_ms: u64) -
             if cfg!(feature = "keyword-index") {
                 let _ = crate::refresh_keyword_index_if_dirty(&cfg, None).await;
             }
-            println!(
-                "Processed batch of {} file(s) (total processed: {}); next refresh after {:?}",
-                batch.len(),
-                processed_total,
-                debounce
-            );
+            if !quiet {
+                println!(
+                    "Processed batch of {} file(s) (total processed: {}); next refresh after {:?}",
+                    batch.len(),
+                    processed_total,
+                    debounce
+                );
+            }
             if !removed.is_empty() {
                 let attempted_vectors = attempted_vectors_last as i64;
                 let attempted_docs = removed.len() as i64;

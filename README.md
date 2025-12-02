@@ -38,3 +38,14 @@ cargo run -p cli
 - Dedupe review: `cargo run -p cli -- actions --show-duplicates --summary` then apply a specific merge: `cargo run -p cli -- apply --ids 5 --fields id,path,status,backup`
 - Search with filters: `cargo run -p cli -- search "invoice" --hybrid --tags finance --fields path,score,duplicate_of,snippet`
 - Watch for changes: `cargo run -p cli -- watch --debounce-ms 2000`
+
+## Dedupe / merge strategies
+- `merge_duplicate` payload supports strategies: `trash_duplicate` (default/keep_original), `replace`/`keep_duplicate` (overwrite survivor), `keep_newest` / `keep_oldest` (decided by mtime), and `keep_original`.
+- Dedupe apply copies tags from duplicate to survivor, deletes duplicate DB row, and logs an audit. Vectors/keyword docs are purged on delete (see `safety.immediate_vector_delete`).
+
+## Remaining work
+- GUI: Tauri shell to surface search/actions/duplicates with approve/merge controls.
+- Classification/AI: richer classifier (LLM prompt, kNN), OCR/media extraction, more parsers.
+- Search UX: per-result merge hints, snippets in actions UI, optional GUI filters.
+- Packaging/CI: binaries/installers, CI for tests/format, watcher/search/dedupe end-to-end tests.
+- Vector/index: better reporting of actual delete counts; optional periodic refresh when `immediate_vector_delete` is false.
