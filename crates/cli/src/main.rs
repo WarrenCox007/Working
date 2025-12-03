@@ -11,12 +11,15 @@ use sqlx::{QueryBuilder, Row};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use storage;
-mod apply;
-mod fs_apply;
-mod keyword_index;
-mod paths;
-mod undo;
-mod watch;
+
+// Import modules from the crate's own library
+use cli::apply;
+use cli::fs_apply;
+use cli::keyword_index;
+use cli::paths;
+use cli::undo;
+use cli::watch;
+
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,6 +52,7 @@ async fn main() -> Result<()> {
         }
         Commands::Apply {
             dry_run,
+            force,
             ids,
             json,
             fields,
@@ -62,6 +66,7 @@ async fn main() -> Result<()> {
             run_apply(
                 cfg,
                 dry_run,
+                force,
                 ids.as_deref(),
                 json,
                 summary,
@@ -195,6 +200,9 @@ enum Commands {
         /// Do not actually perform changes, only print what would happen
         #[arg(long, default_value_t = true)]
         dry_run: bool,
+        /// Bypass the confirmation prompt
+        #[arg(long, short, default_value_t = false)]
+        force: bool,
         /// Comma-separated action IDs to apply; if omitted, apply all planned
         #[arg(long)]
         ids: Option<String>,
@@ -961,6 +969,7 @@ fn build_qdrant_filter(
 async fn run_apply(
     cfg: AppConfig,
     dry_run: bool,
+    force: bool,
     ids: Option<&str>,
     json: bool,
     summary: bool,
@@ -991,7 +1000,7 @@ async fn run_apply(
     }
 
     let actions =
-        apply::apply_actions(&cfg.database.path, dry_run, ids, &safety, &conflict).await?;
+        apply::apply_actions(&cfg.database.path, dry_run, force, ids, &safety, &conflict).await?;
     let mut vals: Vec<serde_json::Value> = actions
         .iter()
         .filter_map(|a| serde_json::to_value(a).ok())

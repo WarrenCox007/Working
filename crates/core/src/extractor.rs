@@ -1,3 +1,5 @@
+use storage::models::File;
+use sqlx::SqlitePool;
 use std::fs;
 use std::io::Read;
 use std::path::PathBuf;
@@ -7,7 +9,6 @@ pub struct ExtractedMetadata {
     pub path: PathBuf,
     pub mime: Option<String>,
     pub size: u64,
-    pub snippets: Vec<String>,
     pub chunks: Vec<Chunk>,
     pub exif: Option<std::collections::HashMap<String, String>>,
 }
@@ -17,10 +18,69 @@ pub struct Chunk {
     pub start: usize,
     pub end: usize,
     pub text: String,
+    pub hash: String,
 }
 
-pub async fn extract(path: PathBuf) -> anyhow::Result<ExtractedMetadata> {
-    // Minimal extractor: capture size, extension-based mime guess, and a small text snippet for text-like files.
+pub async fn run_extractor(pool: &SqlitePool) -> anyhow::Result<()> {
+    let dirty_files =
+        sqlx::query_as::<_, File>("SELECT f.* FROM files f JOIN dirty d ON f.path = d.path")
+            .fetch_all(pool)
+            .await?;
+
+    for file in dirty_files {
+        let path = PathBuf::from(&file.path);
+        let extracted = extract(&path).await?;
+
+        // Clear old data and insert new
+        let mut tx = pool.begin().await?;
+
+        sqlx::query!("DELETE FROM chunks WHERE file_id = ?", file.id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query!("DELETE FROM metadata WHERE file_id = ?", file.id)
+            .execute(&mut *tx)
+            .await?;
+
+        for chunk in extracted.chunks {
+            sqlx::query!(
+                "INSERT INTO chunks (file_id, hash, start, end, text_preview) VALUES (?, ?, ?, ?, ?)",
+                file.id,
+                chunk.hash,
+                chunk.start,
+                chunk.end,
+                chunk.text
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        if let Some(exif_data) = extracted.exif {
+            for (key, value) in exif_data {
+                sqlx::query!(
+                    "INSERT INTO metadata (file_id, key, value, source) VALUES (?, ?, ?, 'exif')",
+                    file.id,
+                    key,
+                    value
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+
+        // TODO: Update mime type on files table
+        // sqlx::query!("UPDATE files SET mime = ? WHERE id = ?", extracted.mime, file.id);
+
+        sqlx::query!("DELETE FROM dirty WHERE path = ?", file.path)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+    }
+
+    Ok(())
+}
+
+pub async fn extract(path: &PathBuf) -> anyhow::Result<ExtractedMetadata> {
     let meta = fs::metadata(&path)?;
     let size = meta.len();
     let mime = guess_mime(&path);
@@ -36,13 +96,11 @@ pub async fn extract(path: PathBuf) -> anyhow::Result<ExtractedMetadata> {
     } else {
         Vec::new()
     };
-    let snippets = chunks.iter().map(|c| c.text.clone()).collect();
 
     Ok(ExtractedMetadata {
-        path,
+        path: path.clone(),
         mime,
         size,
-        snippets,
         chunks,
         exif: exif_meta,
     })
@@ -83,10 +141,12 @@ fn read_text_chunks(
     while start < text.len() {
         let end = (start + chunk_size).min(text.len());
         let slice = text[start..end].to_string();
+        let hash = blake3::hash(slice.as_bytes()).to_hex().to_string();
         chunks.push(Chunk {
             start,
             end,
             text: slice,
+            hash,
         });
         start = end;
     }
@@ -102,10 +162,12 @@ fn pdf_text(path: &PathBuf) -> anyhow::Result<Vec<Chunk>> {
     while start < content.len() {
         let end = (start + chunk_size).min(content.len());
         let slice = content[start..end].to_string();
+        let hash = blake3::hash(slice.as_bytes()).to_hex().to_string();
         chunks.push(Chunk {
             start,
             end,
             text: slice,
+            hash,
         });
         start = end;
     }

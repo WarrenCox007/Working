@@ -26,9 +26,39 @@ fn extract_dest(payload: &str) -> Option<String> {
         .and_then(|v| v.get("to").and_then(|t| t.as_str()).map(|s| s.to_string()))
 }
 
+use crate::fs_apply;
+use crate::paths;
+use anyhow::Result;
+use organizer_core::config::SafetyConfig;
+use serde::Serialize;
+use serde_json::Value;
+use sqlx::Row;
+use std::io::{self, Write};
+use std::path::PathBuf;
+use storage;
+
+#[derive(Debug, Serialize)]
+pub struct ActionView {
+    pub id: i64,
+    pub path: String,
+    pub kind: String,
+    pub payload: String,
+    pub status: String,
+    pub rule: Option<String>,
+    pub error: Option<String>,
+    pub backup: Option<String>,
+}
+
+fn extract_dest(payload: &str) -> Option<String> {
+    serde_json::from_str::<Value>(payload)
+        .ok()
+        .and_then(|v| v.get("to").and_then(|t| t.as_str()).map(|s| s.to_string()))
+}
+
 pub async fn apply_actions(
     db_path: &str,
     dry_run: bool,
+    force: bool,
     ids: Option<&str>,
     safety: &SafetyConfig,
     conflict: &str,
@@ -50,6 +80,21 @@ pub async fn apply_actions(
             .fetch_all(&pool)
             .await?
     };
+
+    if !dry_run && !force && !rows.is_empty() {
+        println!(
+            "About to apply {} actions. This will modify your filesystem.",
+            rows.len()
+        );
+        print!("Apply these actions? [y/N] ");
+        io::stdout().flush()?;
+        let mut confirmation = String::new();
+        io::stdin().read_line(&mut confirmation)?;
+        if confirmation.trim().to_lowercase() != "y" {
+            println!("Aborted by user.");
+            return Ok(Vec::new());
+        }
+    }
 
     let mut views = Vec::new();
 

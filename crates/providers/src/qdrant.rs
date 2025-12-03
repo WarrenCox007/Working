@@ -95,6 +95,43 @@ impl QdrantClient {
         Ok(())
     }
 
+    pub async fn retrieve(&self, ids: Vec<String>) -> Result<QdrantRetrieveResponse, ProviderError> {
+        #[derive(Serialize)]
+        struct RetrieveRequest {
+            ids: Vec<String>,
+            with_vector: bool,
+        }
+        let url = format!(
+            "{}/collections/{}/points",
+            self.cfg.url, self.cfg.collection
+        );
+        let body = RetrieveRequest {
+            ids,
+            with_vector: true,
+        };
+        let mut builder = self.client.post(url).json(&body);
+        if let Some(key) = &self.cfg.api_key {
+            builder = builder.header("api-key", key);
+        }
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.bytes().await.unwrap_or(Bytes::from_static(b""));
+            return Err(ProviderError::RequestFailed(format!(
+                "status {} body {:?}",
+                status, body
+            )));
+        }
+        let parsed: QdrantRetrieveResponse = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        Ok(parsed)
+    }
+
     pub async fn delete_by_filter(&self, filter: serde_json::Value) -> Result<(), ProviderError> {
         #[derive(Serialize)]
         struct DeletePoints {
@@ -171,6 +208,18 @@ pub struct QdrantPoint {
 #[derive(Debug, Deserialize)]
 pub struct QdrantResponse {
     pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct QdrantRetrieveResponse {
+    pub result: Vec<RetrievedPoint>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RetrievedPoint {
+    pub id: String,
+    pub vector: Vec<f32>,
+    pub payload: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Deserialize)]

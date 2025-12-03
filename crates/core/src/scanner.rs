@@ -1,71 +1,75 @@
+//! Scans filesystem for items, computes metadata and hashes, and stores in the DB.
+
+use anyhow::Context;
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use sqlx::SqlitePool;
 use std::fs;
 use std::path::{Path, PathBuf};
+use tokio::sync::mpsc;
 use tokio::task;
 use walkdir::WalkDir;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum HashMode {
+    #[default]
     None,
     Fast, // read first N bytes + size/mtime
     Full, // full-file blake3
 }
 
-#[derive(Debug, Clone)]
-pub struct ScanConfig {
-    pub roots: Vec<PathBuf>,
-    pub include_hidden: bool,
-    pub follow_symlinks: bool,
-    pub excludes: Vec<String>,
-    pub hash_mode: HashMode,
+impl From<&str> for HashMode {
+    fn from(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "fast" => HashMode::Fast,
+            "full" => HashMode::Full,
+            _ => HashMode::None,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct ScannedItem {
     pub path: PathBuf,
     pub is_dir: bool,
-    pub size: u64,
+    pub size: i64,
     pub mtime: i64,
     pub hash: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct ScanResult {
-    pub discovered: Vec<ScannedItem>,
-}
+pub async fn scan(
+    roots: &[PathBuf],
+    excludes: &[String],
+    hash_mode: &HashMode,
+    pool: &SqlitePool,
+) -> anyhow::Result<u64> {
+    let (tx, mut rx) = mpsc::channel(100);
+    let exclude_set = build_globset(excludes)?;
+    let hash_mode = hash_mode.clone();
+    let roots = roots.to_vec();
 
-pub async fn scan(config: ScanConfig) -> anyhow::Result<ScanResult> {
-    let exclude_set = build_globset(&config.excludes)?;
-    let include_hidden = config.include_hidden;
-    let follow_symlinks = config.follow_symlinks;
-    let hash_mode = config.hash_mode.clone();
-
-    let roots = config.roots.clone();
-    let discovered = task::spawn_blocking(move || {
-        let mut items = Vec::new();
+    // Walker task
+    let walker_handle = task::spawn_blocking(move || {
         for root in roots {
             for entry in WalkDir::new(root)
-                .follow_links(follow_symlinks)
+                .follow_links(true)
                 .into_iter()
-                .filter_entry(|e| should_descend(e.path(), include_hidden, &exclude_set))
+                .filter_entry(|e| should_descend(e.path(), false, &exclude_set))
             {
                 let entry = match entry {
                     Ok(e) => e,
                     Err(_) => continue,
                 };
 
-                let path = entry.path().to_path_buf();
-                if is_excluded(&path, &exclude_set) || (!include_hidden && is_hidden(&path)) {
+                let path = entry.path();
+                if path.is_dir() || is_excluded(path, &exclude_set) || is_hidden(path) {
                     continue;
                 }
 
-                let meta = match fs::metadata(&path) {
+                let meta = match fs::metadata(path) {
                     Ok(m) => m,
                     Err(_) => continue,
                 };
 
-                let is_dir = meta.is_dir();
-                let size = meta.len();
                 let mtime = meta
                     .modified()
                     .ok()
@@ -73,30 +77,85 @@ pub async fn scan(config: ScanConfig) -> anyhow::Result<ScanResult> {
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or_default();
 
-                let hash = if is_dir {
-                    None
-                } else {
-                    match hash_mode {
-                        HashMode::None => None,
-                        HashMode::Fast => fast_hash(&path).ok(),
-                        HashMode::Full => full_hash(&path).ok(),
-                    }
+                let hash = match hash_mode {
+                    HashMode::None => None,
+                    HashMode::Fast => fast_hash(path).ok(),
+                    HashMode::Full => full_hash(path).ok(),
                 };
 
-                items.push(ScannedItem {
-                    path,
-                    is_dir,
-                    size,
+                let item = ScannedItem {
+                    path: path.to_path_buf(),
+                    is_dir: meta.is_dir(),
+                    size: meta.len() as i64,
                     mtime,
                     hash,
-                });
+                };
+
+                if tx.blocking_send(item).is_err() {
+                    // Receiver dropped, stop walking.
+                    break;
+                }
             }
         }
-        items
-    })
+    });
+
+    let mut count = 0u64;
+    while let Some(item) = rx.recv().await {
+        upsert_file_in_db(pool, &item)
+            .await
+            .with_context(|| format!("Failed to upsert file in DB: {:?}", item.path))?;
+        count += 1;
+    }
+
+    walker_handle.await?;
+    Ok(count)
+}
+
+async fn upsert_file_in_db(pool: &SqlitePool, item: &ScannedItem) -> anyhow::Result<()> {
+    let path_str = item.path.to_string_lossy().to_string();
+    let ext = item
+        .path
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_string());
+
+    let ctime = item.mtime; // Placeholder
+
+    let res = sqlx::query!(
+        r#"
+        INSERT INTO files (path, size, mtime, ctime, hash, ext, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))
+        ON CONFLICT(path) DO UPDATE SET
+            size = excluded.size,
+            mtime = excluded.mtime,
+            hash = excluded.hash,
+            last_seen = strftime('%s','now'),
+            status = 'seen'
+        WHERE
+            files.size != excluded.size OR
+            files.mtime != excluded.mtime OR
+            COALESCE(files.hash, '') != COALESCE(excluded.hash, '');
+        "#,
+        path_str,
+        item.size,
+        item.mtime,
+        ctime,
+        item.hash,
+        ext
+    )
+    .execute(pool)
     .await?;
 
-    Ok(ScanResult { discovered })
+    if res.rows_affected() > 0 {
+        sqlx::query!(
+            "INSERT OR REPLACE INTO dirty (path, reason) VALUES (?, 'rescan')",
+            path_str
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    Ok(())
 }
 
 fn build_globset(patterns: &[String]) -> anyhow::Result<GlobSet> {
