@@ -1,8 +1,7 @@
 use crate::config::AppConfig;
-use crate::embeddings::EmbeddingResult;
 use crate::{
-    classifier, embeddings, extractor, indexer, scanner, suggester,
-    vectorstore::{self, VectorStore},
+    classifier, embeddings, extractor, scanner, suggester,
+    vectorstore::{self, AsQdrant, VectorStore},
 };
 use anyhow::Context;
 use providers::lmstudio::{LmStudioConfig, LmStudioProvider};
@@ -12,7 +11,7 @@ use providers::qdrant::QdrantClient;
 use providers::ProviderRegistry;
 use std::sync::Arc;
 use storage::{connect, migrate};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 pub enum PipelineMode {
     Scan,
@@ -21,6 +20,7 @@ pub enum PipelineMode {
     All,
 }
 
+#[derive(Default)]
 pub struct PipelineSummary {
     pub discovered: usize,
     pub processed_files: usize,
@@ -62,22 +62,28 @@ pub async fn run_with_mode_summary(
         PipelineMode::Classify | PipelineMode::Suggest | PipelineMode::All
     ) {
         info!("Starting extraction phase...");
-        extractor::run_extractor(&pool).await?;
+        extractor::run_extractor(&pool, &config.parsers).await?;
         info!("Extraction complete.");
 
         if let Some(qdrant) = &qdrant_client {
             info!("Starting embedding phase...");
-            embeddings::run_embedder(&pool, &registry, qdrant, config.embeddings.batch_size)
-                .await?;
-            info!("Embedding complete.");
+            let embedded = embeddings::run_embedder(
+                &pool,
+                &registry,
+                qdrant,
+                config.embeddings.batch_size,
+            )
+            .await?;
+            summary.embedded_chunks += embedded;
+            info!("Embedding complete ({} chunks).", embedded);
         }
 
         info!("Starting classification phase...");
         if let Some(qdrant) = &qdrant_client {
-            classifier::run_classifier(&pool, &registry, qdrant).await?;
+            summary.processed_files += classifier::run_classifier(&pool, &registry, qdrant).await?;
         } else {
             warn!("Vector DB not configured, skipping kNN classification.");
-            classifier::run_classifier_no_knn(&pool, &registry).await?;
+            summary.processed_files += classifier::run_classifier_no_knn(&pool, &registry).await?;
         }
         info!("Classification complete.");
     }

@@ -19,17 +19,18 @@ pub mod enabled {
         let schema = index.schema();
         let path_field = schema
             .get_field("path")
-            .ok_or_else(|| anyhow!("path field missing in index schema"))?;
+            .map_err(|_| anyhow!("path field missing in index schema"))?;
         let text_field = schema
             .get_field("text")
-            .ok_or_else(|| anyhow!("text field missing in index schema"))?;
+            .map_err(|_| anyhow!("text field missing in index schema"))?;
         let mut writer: IndexWriter = index.writer(50_000_000)?;
         // Reset before refresh to keep the index in sync with the DB snapshot.
-        writer.delete_all();
+        let _ = writer.delete_all_documents();
         for (p, t) in docs {
-            writer.add_document(doc!(path_field=>p.as_str(), text_field=>t.as_str()));
+            let _ = writer.add_document(doc!(path_field=>p.as_str(), text_field=>t.as_str()));
         }
         writer.commit()?;
+        use tantivy::Directory;
         index.directory().sync_directory()?;
         Ok(())
     }
@@ -39,16 +40,17 @@ pub mod enabled {
         let schema = index.schema();
         let path_field = schema
             .get_field("path")
-            .ok_or_else(|| anyhow!("path field missing in index schema"))?;
+            .map_err(|_| anyhow!("path field missing in index schema"))?;
         let text_field = schema
             .get_field("text")
-            .ok_or_else(|| anyhow!("text field missing in index schema"))?;
+            .map_err(|_| anyhow!("text field missing in index schema"))?;
         let mut writer: IndexWriter = index.writer(50_000_000)?;
         for (p, t) in docs {
             writer.delete_term(Term::from_field_text(path_field, p));
-            writer.add_document(doc!(path_field=>p.as_str(), text_field=>t.as_str()));
+            let _ = writer.add_document(doc!(path_field=>p.as_str(), text_field=>t.as_str()));
         }
         writer.commit()?;
+        use tantivy::Directory;
         index.directory().sync_directory()?;
         Ok(())
     }
@@ -58,12 +60,13 @@ pub mod enabled {
         let schema = index.schema();
         let path_field = schema
             .get_field("path")
-            .ok_or_else(|| anyhow!("path field missing in index schema"))?;
+            .map_err(|_| anyhow!("path field missing in index schema"))?;
         let mut writer: IndexWriter = index.writer(50_000_000)?;
         for p in paths {
             writer.delete_term(Term::from_field_text(path_field, p));
         }
         writer.commit()?;
+        use tantivy::Directory;
         index.directory().sync_directory()?;
         Ok(())
     }
@@ -85,7 +88,7 @@ pub mod enabled {
         for (_score, addr) in top_docs {
             let doc = searcher.doc(addr)?;
             if let Some(val) = doc.get_first(path_field) {
-                if let Some(text) = val.text() {
+                if let Some(text) = val.as_text() {
                     results.push(text.to_string());
                 }
             }

@@ -3,7 +3,8 @@ members = [
     "crates/core",
     "crates/cli",
     "crates/providers",
-    "crates/storage"
+    "crates/storage",
+    "desktop/src-tauri"
 ]
 resolver = "2"
 
@@ -26,3 +27,9 @@ globset = "0.4"
 blake3 = "1"
 async-trait = "0.1"
 chrono = "0.4"
+
+[patch.crates-io]
+# Pin zstd to Windows-friendly revisions for Tantivy (keyword-index).
+zstd = { git = "https://github.com/gyscos/zstd-rs", rev = "12867809bf3cccf4531c597548ca8bbf14696730" } # v0.12.3
+zstd-safe = { git = "https://github.com/gyscos/zstd-rs", rev = "12867809bf3cccf4531c597548ca8bbf14696730" }
+zstd-sys = { git = "https://github.com/gyscos/zstd-rs", rev = "12867809bf3cccf4531c597548ca8bbf14696730" }

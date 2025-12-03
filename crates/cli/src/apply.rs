@@ -5,34 +5,6 @@ use organizer_core::config::SafetyConfig;
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::Row;
-use std::path::PathBuf;
-use storage;
-
-#[derive(Debug, Serialize)]
-pub struct ActionView {
-    pub id: i64,
-    pub path: String,
-    pub kind: String,
-    pub payload: String,
-    pub status: String,
-    pub rule: Option<String>,
-    pub error: Option<String>,
-    pub backup: Option<String>,
-}
-
-fn extract_dest(payload: &str) -> Option<String> {
-    serde_json::from_str::<Value>(payload)
-        .ok()
-        .and_then(|v| v.get("to").and_then(|t| t.as_str()).map(|s| s.to_string()))
-}
-
-use crate::fs_apply;
-use crate::paths;
-use anyhow::Result;
-use organizer_core::config::SafetyConfig;
-use serde::Serialize;
-use serde_json::Value;
-use sqlx::Row;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use storage;

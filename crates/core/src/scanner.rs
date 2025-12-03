@@ -34,6 +34,7 @@ pub struct ScannedItem {
     pub size: i64,
     pub mtime: i64,
     pub hash: Option<String>,
+    pub hash_kind: HashMode,
 }
 
 pub async fn scan(
@@ -70,18 +71,18 @@ pub async fn scan(
                     Err(_) => continue,
                 };
 
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or_default();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
 
-                let hash = match hash_mode {
-                    HashMode::None => None,
-                    HashMode::Fast => fast_hash(path).ok(),
-                    HashMode::Full => full_hash(path).ok(),
-                };
+    let hash = match hash_mode {
+        HashMode::None => None,
+        HashMode::Fast => fast_hash(path).ok(),
+        HashMode::Full => full_hash(path).ok(),
+    };
 
                 let item = ScannedItem {
                     path: path.to_path_buf(),
@@ -89,6 +90,7 @@ pub async fn scan(
                     size: meta.len() as i64,
                     mtime,
                     hash,
+                    hash_kind: hash_mode.clone(),
                 };
 
                 if tx.blocking_send(item).is_err() {
@@ -121,14 +123,16 @@ async fn upsert_file_in_db(pool: &SqlitePool, item: &ScannedItem) -> anyhow::Res
 
     let ctime = item.mtime; // Placeholder
 
-    let res = sqlx::query!(
+    let res = sqlx::query(
         r#"
-        INSERT INTO files (path, size, mtime, ctime, hash, ext, last_seen)
-        VALUES (?, ?, ?, ?, ?, ?, strftime('%s','now'))
+        INSERT INTO files (path, size, mtime, ctime, hash, fast_hash, full_hash, ext, last_seen)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, strftime('%s','now'))
         ON CONFLICT(path) DO UPDATE SET
             size = excluded.size,
             mtime = excluded.mtime,
             hash = excluded.hash,
+            fast_hash = COALESCE(excluded.fast_hash, files.fast_hash),
+            full_hash = COALESCE(excluded.full_hash, files.full_hash),
             last_seen = strftime('%s','now'),
             status = 'seen'
         WHERE
@@ -136,23 +140,29 @@ async fn upsert_file_in_db(pool: &SqlitePool, item: &ScannedItem) -> anyhow::Res
             files.mtime != excluded.mtime OR
             COALESCE(files.hash, '') != COALESCE(excluded.hash, '');
         "#,
-        path_str,
-        item.size,
-        item.mtime,
-        ctime,
-        item.hash,
-        ext
     )
+    .bind(&path_str)
+    .bind(item.size)
+    .bind(item.mtime)
+    .bind(ctime)
+    .bind(&item.hash) // legacy hash column
+    .bind(match item.hash_kind {
+        HashMode::Fast => item.hash.clone(),
+        _ => None,
+    })
+    .bind(match item.hash_kind {
+        HashMode::Full => item.hash.clone(),
+        _ => None,
+    })
+    .bind(&ext)
     .execute(pool)
     .await?;
 
     if res.rows_affected() > 0 {
-        sqlx::query!(
-            "INSERT OR REPLACE INTO dirty (path, reason) VALUES (?, 'rescan')",
-            path_str
-        )
-        .execute(pool)
-        .await?;
+        sqlx::query("INSERT OR REPLACE INTO dirty (path, reason) VALUES (?, 'rescan')")
+            .bind(&path_str)
+            .execute(pool)
+            .await?;
     }
 
     Ok(())

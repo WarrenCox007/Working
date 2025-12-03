@@ -9,6 +9,8 @@ pub struct AppConfig {
     pub classification: ClassificationConfig,
     pub safety: SafetyConfig,
     pub rules: RuleConfig,
+    #[serde(default)]
+    pub parsers: ParserConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +69,22 @@ pub struct DatabaseConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuleConfig {
     pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ParserConfig {
+    #[serde(default)]
+    pub pdf: bool,
+    #[serde(default)]
+    pub office: bool,
+    #[serde(default)]
+    pub image_meta: bool,
+    #[serde(default)]
+    pub ocr: bool,
+    #[serde(default)]
+    pub max_ocr_bytes: Option<u64>,
+    #[serde(default)]
+    pub max_image_bytes: Option<u64>,
 }
 
 pub fn load(path: Option<&str>) -> anyhow::Result<AppConfig> {

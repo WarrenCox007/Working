@@ -1,4 +1,4 @@
-use storage::models::{File, Rule as DbRule};
+use storage::models::Rule as DbRule;
 use crate::rules::{self, Rule, RuleContext};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -77,15 +77,15 @@ pub async fn run_suggester(pool: &SqlitePool) -> anyhow::Result<()> {
                 };
 
                 // 4. Store action in DB
-                sqlx::query!(
+                sqlx::query(
                     r#"
                     INSERT INTO actions (file_id, kind, payload_json, status)
                     VALUES (?, ?, ?, 'planned')
                     "#,
-                    file.id,
-                    kind,
-                    payload.to_string()
                 )
+                .bind(file.id)
+                .bind(kind)
+                .bind(payload.to_string())
                 .execute(pool)
                 .await?;
             }

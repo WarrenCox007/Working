@@ -5,6 +5,7 @@ use organizer_core::classifier;
 use organizer_core::suggester;
 use std::fs;
 use tempfile::tempdir;
+use sqlx::Row;
 
 #[tokio::test]
 async fn test_full_pipeline() {
@@ -14,8 +15,8 @@ async fn test_full_pipeline() {
     let dest_dir = temp.path().join("dest");
     let trash_dir = temp.path().join("trash");
     let rules_dir = temp.path().join("rules");
-    let db_path = temp.path().join("test.db");
-    let db_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
+    // Use shared in-memory DB so multiple connections see the same data.
+    let db_url = "sqlite://file:pipeline_test?mode=memory&cache=shared".to_string();
 
     fs::create_dir_all(&src_dir).unwrap();
     fs::create_dir_all(&dest_dir).unwrap();
@@ -37,7 +38,12 @@ async fn test_full_pipeline() {
         [[actions]]
         type = "move"
         to = "{dest_dir}/doc.txt"
-    "#.replace("{dest_dir}", &dest_dir.to_string_lossy());
+    "#.replace(
+        "{dest_dir}",
+        &dest_dir
+            .to_string_lossy()
+            .replace('\\', "/"),
+    );
     fs::write(rules_dir.join("move_docs.toml"), rule_content).unwrap();
 
 
@@ -64,6 +70,7 @@ async fn test_full_pipeline() {
         embeddings: EmbeddingConfig { provider: "noop".to_string(), model: "".to_string(), batch_size: 1 },
         vectors: VectorConfig { provider: "noop".to_string(), url: None, collection: "".to_string() },
         classification: ClassificationConfig { thresholds: Thresholds { accept: 0.5, review: 0.1 } },
+        parsers: organizer_core::config::ParserConfig::default(),
     };
 
     let pool = storage::connect(&cfg.database.path).await.unwrap();
@@ -74,11 +81,11 @@ async fn test_full_pipeline() {
     let hash_mode = organizer_core::scanner::HashMode::from(cfg.scan.hash_mode.as_deref().unwrap_or(""));
     scanner::scan(&roots, &cfg.scan.exclude, &hash_mode, &pool).await.unwrap();
 
-    extractor::run_extractor(&pool).await.unwrap();
+    extractor::run_extractor(&pool, &cfg.parsers).await.unwrap();
     
     // We need a provider registry for the classifier. A NoOp provider is fine for this test.
     let registry = organizer_core::pipeline::build_registry(&cfg);
-    classifier::run_classifier(&pool, &registry).await.unwrap();
+    classifier::run_classifier_no_knn(&pool, &registry).await.unwrap();
     
     // Load rules from the config file path and insert them into the DB for the suggester
     let rules = organizer_core::rules::load_rules_from_dir(&rules_dir).unwrap();

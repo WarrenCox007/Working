@@ -1,12 +1,16 @@
 use crate::keyword_index;
 use anyhow::Result;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use organizer_core::classifier;
 use organizer_core::config::{AppConfig, SafetyConfig};
+use organizer_core::embeddings;
+use organizer_core::extractor;
 use organizer_core::pipeline;
+use organizer_core::scanner::{self, HashMode};
 use organizer_core::vectorstore::AsQdrant;
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row};
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 use storage;
@@ -72,7 +76,7 @@ pub async fn watch_paths(
             processed_total += batch.len();
             for path in &batch {
                 if path.is_file() {
-                    if let Err(e) = pipeline::process_file(&cfg, path).await {
+                    if let Err(e) = process_file(&cfg, path).await {
                         eprintln!("process error for {:?}: {}", path, e);
                     } else {
                         let _ = mark_dirty(&cfg.database.path, path).await;
@@ -99,7 +103,7 @@ pub async fn watch_paths(
             if !removed.is_empty() {
                 if cfg!(feature = "keyword-index") {
                     let _ = keyword_index::enabled::delete_docs(
-                        &crate::keyword_index_dir(&cfg.database.path),
+                        &keyword_index_dir(&cfg.database.path),
                         &removed,
                     );
                 }
@@ -139,7 +143,7 @@ pub async fn watch_paths(
                 }
             }
             if cfg!(feature = "keyword-index") {
-                let _ = crate::refresh_keyword_index_if_dirty(&cfg, None).await;
+                let _ = refresh_keyword_index_if_dirty(&cfg, None).await;
             }
             if !quiet {
                 println!(
@@ -164,6 +168,193 @@ pub async fn watch_paths(
             }
         }
     }
+}
+
+async fn process_file(cfg: &AppConfig, path: &PathBuf) -> Result<()> {
+    // Re-scan just this path, then run extractor/embed/classify.
+    let pool = storage::connect(&cfg.database.path).await?;
+    // Capture existing hash to detect change.
+    let hash_before: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE(full_hash, fast_hash, hash) FROM files WHERE path = ?",
+    )
+        .bind(path.to_string_lossy())
+        .fetch_optional(&pool)
+        .await?
+        .flatten();
+
+    let hash_mode = HashMode::from(cfg.scan.hash_mode.as_deref().unwrap_or(""));
+    let excludes = cfg.scan.exclude.clone();
+    let roots = vec![path.clone()];
+    scanner::scan(&roots, &excludes, &hash_mode, &pool).await?;
+
+    extractor::run_extractor(&pool, &cfg.parsers).await?;
+
+    // Restrict downstream work to this file for speed.
+    let file_row = sqlx::query("SELECT id FROM files WHERE path = ?")
+        .bind(path.to_string_lossy())
+        .fetch_optional(&pool)
+        .await?;
+    let file_ids: Vec<i64> = file_row.into_iter().filter_map(|r| r.try_get(0).ok()).collect();
+    if file_ids.is_empty() {
+        return Ok(());
+    }
+
+    // If hash unchanged, skip embed/classify.
+    let hash_after: Option<String> = sqlx::query_scalar(
+        "SELECT COALESCE(full_hash, fast_hash, hash) FROM files WHERE id = ?",
+    )
+        .bind(file_ids[0])
+        .fetch_optional(&pool)
+        .await?
+        .flatten();
+    if hash_before.is_some() && hash_before == hash_after {
+        return Ok(());
+    }
+
+    let registry = pipeline::build_registry(cfg);
+    let vector_store = pipeline::build_vector_store(cfg);
+    if let Some(qdrant) = vector_store.downcast_qdrant() {
+        // Embed any new chunks and classify with kNN.
+        let _ = embeddings::run_embedder_for_files(
+            &pool,
+            &registry,
+            &qdrant,
+            cfg.embeddings.batch_size,
+            Some(&file_ids),
+        )
+        .await?;
+        let files = files_for_ids(&pool, &file_ids).await?;
+        if !files.is_empty() {
+            let _ =
+                classifier::run_classifier_for_files(&pool, &registry, &qdrant, files).await?;
+        }
+    } else {
+        let files = files_for_ids(&pool, &file_ids).await?;
+        if !files.is_empty() {
+            let _ = classifier::run_classifier_no_knn_for_files(&pool, &registry, files).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn files_for_ids(pool: &sqlx::SqlitePool, ids: &[i64]) -> Result<Vec<storage::models::File>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut qb = QueryBuilder::new("SELECT * FROM files WHERE id IN (");
+    let mut separated = qb.separated(", ");
+    for id in ids {
+        separated.push_bind(id);
+    }
+    separated.push_unseparated(")");
+    let rows = qb.build_query_as::<storage::models::File>().fetch_all(pool).await?;
+    Ok(rows)
+}
+
+// Copied from main.rs until shared helpers are extracted.
+fn keyword_index_dir(db_path: &str) -> PathBuf {
+    let stripped = db_path.strip_prefix("sqlite://").unwrap_or(db_path);
+    let db = PathBuf::from(stripped);
+    let base = if stripped == ":memory:" {
+        std::env::temp_dir()
+    } else {
+        db.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+    };
+    let dir = base.join(".organizer_keyword_index");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+async fn refresh_keyword_index_if_dirty(cfg: &AppConfig, tags: Option<&[String]>) -> Result<()> {
+    if !cfg!(feature = "keyword-index") {
+        return Ok(());
+    }
+    let pool = storage::connect(&cfg.database.path).await?;
+    let rows = sqlx::query("SELECT path FROM dirty")
+        .fetch_all(&pool)
+        .await?;
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let paths: Vec<String> = rows.into_iter().filter_map(|r| r.try_get(0).ok()).collect();
+    let dir = keyword_index_dir(&cfg.database.path);
+    let (docs, missing) = keyword_index_docs_for_paths(&cfg.database.path, &paths, tags).await?;
+    if dir.join("meta.json").exists() {
+        let _ = keyword_index::enabled::upsert_docs(&dir, &docs);
+        if !missing.is_empty() {
+            let _ = keyword_index::enabled::delete_docs(&dir, &missing);
+        }
+    } else {
+        let _ = keyword_index::enabled::build_index(&dir, &docs);
+    }
+    let mut qb = sqlx::QueryBuilder::new("DELETE FROM dirty WHERE path IN (");
+    let mut separated = qb.separated(", ");
+    for p in &paths {
+        separated.push_bind(p);
+    }
+    separated.push_unseparated(")");
+    let _ = qb.build().execute(&pool).await;
+    Ok(())
+}
+
+pub async fn keyword_index_docs_for_paths(
+    db_path: &str,
+    paths: &[String],
+    _tags: Option<&[String]>,
+) -> Result<(Vec<(String, String)>, Vec<String>)> {
+    if paths.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let pool = storage::connect(db_path).await?;
+    let mut qb = QueryBuilder::new("SELECT path, mime, id FROM files WHERE path IN (");
+    let mut separated = qb.separated(", ");
+    for p in paths {
+        separated.push_bind(p);
+    }
+    separated.push_unseparated(")");
+    let rows = qb.build().fetch_all(&pool).await?;
+    let mut docs = Vec::new();
+    let mut found = HashSet::new();
+    let mut file_ids = Vec::new();
+    for row in rows {
+        let path: String = row.get(0);
+        let mime: Option<String> = row.try_get(1).ok();
+        let file_id: i64 = row.try_get(2).unwrap_or_default();
+        file_ids.push((file_id, path.clone(), mime.clone()));
+        let doc_text = format!("{} {}", path, mime.clone().unwrap_or_default());
+        docs.push((path.clone(), doc_text));
+        found.insert(path);
+    }
+    // Append first chunk preview text for richer keyword search
+    if !file_ids.is_empty() {
+        let mut qb_chunks =
+            QueryBuilder::new("SELECT file_id, text_preview FROM chunks WHERE file_id IN (");
+        let mut sep = qb_chunks.separated(", ");
+        for (id, _, _) in &file_ids {
+            sep.push_bind(id);
+        }
+        sep.push_unseparated(")");
+        let chunk_rows = qb_chunks.build().fetch_all(&pool).await?;
+        let mut chunk_map: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
+        for row in chunk_rows {
+            let fid: i64 = row.try_get(0).unwrap_or_default();
+            if let Ok(Some(text)) = row.try_get::<Option<String>, _>(1) {
+                chunk_map.entry(fid).or_insert(text);
+            }
+        }
+        for (fid, path, mime) in file_ids {
+            if let Some(text) = chunk_map.get(&fid) {
+                let doc_text = format!("{} {} {}", path, mime.clone().unwrap_or_default(), text);
+                docs.push((path.clone(), doc_text));
+            }
+        }
+    }
+    let missing: Vec<String> = paths
+        .iter()
+        .filter(|p| !found.contains(*p))
+        .cloned()
+        .collect();
+    Ok((docs, missing))
 }
 
 async fn mark_dirty(db_path: &str, path: &PathBuf) -> Result<()> {

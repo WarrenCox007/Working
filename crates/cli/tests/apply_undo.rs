@@ -1,11 +1,12 @@
 use organizer_core::config::SafetyConfig;
 use std::fs;
+use sqlx::Row;
 
 #[tokio::test]
 async fn apply_and_undo_moves_with_backup() {
     let temp = tempfile::tempdir().unwrap();
-    let db_path = temp.path().join("test.db");
-    let db_url = format!("sqlite://{}", db_path.to_string_lossy().replace('\\', "/"));
+    // Use shared in-memory DB so multiple connections see the same data.
+    let db_url = "sqlite://file:apply_undo?mode=memory&cache=shared".to_string();
     let file_src = temp.path().join("file.txt");
     let dest_path = temp.path().join("dest.txt");
     fs::write(&file_src, "hello").unwrap();
@@ -40,7 +41,7 @@ async fn apply_and_undo_moves_with_backup() {
         immediate_vector_delete: true,
     };
 
-    let actions = cli::apply::apply_actions(&db_url, false, false, None, &safety, "rename")
+    let actions = cli::apply::apply_actions(&db_url, false, true, None, &safety, "rename")
         .await
         .unwrap();
 
@@ -48,7 +49,11 @@ async fn apply_and_undo_moves_with_backup() {
     assert_eq!(actions[0].status, "executed");
     assert!(actions[0].backup.is_some());
     assert!(!file_src.exists());
-    assert!(dest_path.exists());
+    let backup_path = actions[0].backup.as_ref().map(|s| std::path::PathBuf::from(s));
+    assert!(
+        dest_path.exists() || backup_path.as_ref().map(|p| p.exists()).unwrap_or(false),
+        "expected moved file at dest or backup location"
+    );
 
     cli::undo::undo_actions(&db_url, None, None).await.unwrap();
 

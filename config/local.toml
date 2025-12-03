@@ -1,0 +1,41 @@
+[database]
+path = "data/organizer.db"
+
+[scan]
+include = ["C:/Users/Admin/Desktop/Working/test"]
+exclude = []
+hash_mode = "fast"
+
+[embeddings]
+provider = "noop"
+model = "text-embedding-3-small"
+batch_size = 16
+
+[vectors]
+provider = "noop"
+url = "http://localhost:6333"
+collection = "files"
+
+[classification.thresholds]
+accept = 0.8
+review = 0.5
+
+[safety]
+dry_run = true
+allow_delete = false
+allow_paths = []
+deny_paths = ["/Windows", "C:\\Windows", "/System"]
+trash_dir = "trash"
+copy_then_delete = false
+immediate_vector_delete = true
+
+[rules]
+path = "rules"
+
+[parsers]
+pdf = true
+office = true
+image_meta = true
+ocr = false
+max_ocr_bytes = 2097152
+max_image_bytes = 20971520

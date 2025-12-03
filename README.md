@@ -7,9 +7,10 @@ Early scaffold for a Rust-based AI-powered file and folder organizer (scanner ->
 - `crates/providers/` – provider traits for LLMs/embeddings.
 - `crates/storage/` – SQLite pool + migrations placeholder.
 - `crates/cli/` – prototype CLI entrypoint.
-- `config/` – sample config.
-- `prompt_templates/` – prompt stubs.
-- `docs/` – design notes.
+- `config/` - sample config.
+- `prompt_templates/` - prompt stubs.
+- `docs/` - design notes.
+- `scripts/` - helper scripts (e.g., Qdrant init).
 
 ## Next Steps
 1. Fill schemas/migrations in `storage` for files/metadata/chunks/tags/actions/rules/audit.
@@ -38,6 +39,21 @@ cargo run -p cli
 - Dedupe review: `cargo run -p cli -- actions --show-duplicates --summary` then apply a specific merge: `cargo run -p cli -- apply --ids 5 --fields id,path,status,backup`
 - Search with filters: `cargo run -p cli -- search "invoice" --hybrid --tags finance --fields path,score,duplicate_of,snippet`
 - Watch for changes: `cargo run -p cli -- watch --debounce-ms 2000`
+- Refresh vector payloads (path prefixes) for all/dirty/specific paths: `cargo run -p cli -- rebuild-vectors --dirty-only` or `--paths /path/a,/path/b`
+- Rebuild keyword index: `cargo run -p cli -- rebuild-keyword-index --dirty-only`
+- Backfill full file hashes: `cargo run -p cli -- backfill-full-hashes`
+- Enable parsers via config (if features enabled):
+  ```toml
+  [parsers]
+  pdf = true
+  office = true
+  image_meta = true
+  ocr = false
+  # Optional cap for OCR (bytes)
+  max_ocr_bytes = 2097152
+  # Optional cap for image metadata decode (bytes)
+  max_image_bytes = 20971520
+  ```
 
 ## Dedupe / merge strategies
 - `merge_duplicate` payload supports strategies: `trash_duplicate` (default/keep_original), `replace`/`keep_duplicate` (overwrite survivor), `keep_newest` / `keep_oldest` (decided by mtime), and `keep_original`.

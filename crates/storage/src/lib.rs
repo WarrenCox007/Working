@@ -17,6 +17,8 @@ pub mod models {
         pub mtime: i64,
         pub ctime: i64,
         pub hash: Option<String>,
+        pub fast_hash: Option<String>,
+        pub full_hash: Option<String>,
         pub mime: Option<String>,
         pub ext: Option<String>,
         pub status: String,

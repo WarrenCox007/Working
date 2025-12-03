@@ -1,9 +1,10 @@
 use anyhow::Result;
-use providers::qdrant::{QdrantClient, SearchResult};
+use providers::qdrant::QdrantClient;
 use providers::ProviderRegistry;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use storage::models::{Chunk, File};
+use sqlx::Row;
 
 #[derive(Debug, Clone)]
 pub struct ClassificationInput {
@@ -23,13 +24,22 @@ pub async fn run_classifier(
     pool: &SqlitePool,
     registry: &ProviderRegistry,
     vector_db: &QdrantClient,
-) -> Result<()> {
+) -> Result<usize> {
     let files_to_classify = sqlx::query_as::<_, File>(
         "SELECT * FROM files WHERE id NOT IN (SELECT DISTINCT file_id FROM file_tags)",
     )
     .fetch_all(pool)
     .await?;
+    run_classifier_for_files(pool, registry, vector_db, files_to_classify).await
+}
 
+pub async fn run_classifier_for_files(
+    pool: &SqlitePool,
+    registry: &ProviderRegistry,
+    vector_db: &QdrantClient,
+    files_to_classify: Vec<File>,
+) -> Result<usize> {
+    let total = files_to_classify.len();
     for file in files_to_classify {
         let chunks =
             sqlx::query_as::<_, Chunk>("SELECT * FROM chunks WHERE file_id = ? ORDER BY start")
@@ -75,20 +85,23 @@ pub async fn run_classifier(
             // Threshold to accept classification
             let mut tx = pool.begin().await?;
 
-            sqlx::query!("INSERT OR IGNORE INTO tags (name) VALUES (?)", outcome.label)
+            sqlx::query("INSERT OR IGNORE INTO tags (name) VALUES (?)")
+                .bind(&outcome.label)
                 .execute(&mut *tx)
                 .await?;
 
-            let tag = sqlx::query!("SELECT id FROM tags WHERE name = ?", outcome.label)
+            let tag = sqlx::query("SELECT id FROM tags WHERE name = ?")
+                .bind(&outcome.label)
                 .fetch_one(&mut *tx)
                 .await?;
+            let tag_id: i64 = tag.get(0);
 
-            sqlx::query!(
+            sqlx::query(
                 "INSERT OR IGNORE INTO file_tags (file_id, tag_id, confidence, source) VALUES (?, ?, ?, 'classifier')",
-                file.id,
-                tag.id,
-                outcome.confidence
             )
+            .bind(file.id)
+            .bind(tag_id)
+            .bind(outcome.confidence)
             .execute(&mut *tx)
             .await?;
 
@@ -96,20 +109,28 @@ pub async fn run_classifier(
         }
     }
 
-    Ok(())
+    Ok(total)
 }
 
 /// A version of the classifier runner that does not perform kNN.
 pub async fn run_classifier_no_knn(
     pool: &SqlitePool,
     registry: &ProviderRegistry,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     let files_to_classify = sqlx::query_as::<_, File>(
         "SELECT * FROM files WHERE id NOT IN (SELECT DISTINCT file_id FROM file_tags)",
     )
     .fetch_all(pool)
     .await?;
+    run_classifier_no_knn_for_files(pool, registry, files_to_classify).await
+}
 
+pub async fn run_classifier_no_knn_for_files(
+    pool: &SqlitePool,
+    registry: &ProviderRegistry,
+    files_to_classify: Vec<File>,
+) -> anyhow::Result<usize> {
+    let total = files_to_classify.len();
     for file in files_to_classify {
         let chunks =
             sqlx::query_as::<_, Chunk>("SELECT * FROM chunks WHERE file_id = ? ORDER BY start")
@@ -142,20 +163,23 @@ pub async fn run_classifier_no_knn(
             // Threshold to accept classification
             let mut tx = pool.begin().await?;
 
-            sqlx::query!("INSERT OR IGNORE INTO tags (name) VALUES (?)", outcome.label)
+            sqlx::query("INSERT OR IGNORE INTO tags (name) VALUES (?)")
+                .bind(&outcome.label)
                 .execute(&mut *tx)
                 .await?;
 
-            let tag = sqlx::query!("SELECT id FROM tags WHERE name = ?", outcome.label)
+            let tag = sqlx::query("SELECT id FROM tags WHERE name = ?")
+                .bind(&outcome.label)
                 .fetch_one(&mut *tx)
                 .await?;
+            let tag_id: i64 = tag.get(0);
 
-            sqlx::query!(
+            sqlx::query(
                 "INSERT OR IGNORE INTO file_tags (file_id, tag_id, confidence, source) VALUES (?, ?, ?, 'classifier')",
-                file.id,
-                tag.id,
-                outcome.confidence
             )
+            .bind(file.id)
+            .bind(tag_id)
+            .bind(outcome.confidence)
             .execute(&mut *tx)
             .await?;
 
@@ -163,7 +187,7 @@ pub async fn run_classifier_no_knn(
         }
     }
 
-    Ok(())
+    Ok(total)
 }
 
 async fn classify_knn(
@@ -173,7 +197,7 @@ async fn classify_knn(
     vector_db: &QdrantClient,
     k: usize,
 ) -> Result<Vec<(String, f32)>> {
-    let mut neighbor_tags = HashMap::new();
+    let mut neighbor_tags: HashMap<String, (f32, u32)> = HashMap::new();
 
     for vector in vectors {
         // Exclude self from search results
@@ -212,11 +236,16 @@ async fn classify_knn(
 
         let tags = query.fetch_all(pool).await?;
         for (tag, confidence) in tags {
-            *neighbor_tags.entry(tag).or_insert(0.0) += confidence;
+            let entry = neighbor_tags.entry(tag).or_insert((0.0, 0));
+            entry.0 += confidence;
+            entry.1 += 1;
         }
     }
 
-    let mut sorted_tags: Vec<(String, f32)> = neighbor_tags.into_iter().collect();
+    let mut sorted_tags: Vec<(String, f32)> = neighbor_tags
+        .into_iter()
+        .map(|(tag, (sum, count))| (tag, if count > 0 { sum / count as f32 } else { 0.0 }))
+        .collect();
     sorted_tags.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
     Ok(sorted_tags)

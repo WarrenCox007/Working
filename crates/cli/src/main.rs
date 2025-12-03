@@ -14,9 +14,7 @@ use storage;
 
 // Import modules from the crate's own library
 use cli::apply;
-use cli::fs_apply;
 use cli::keyword_index;
-use cli::paths;
 use cli::undo;
 use cli::watch;
 
@@ -154,6 +152,18 @@ async fn main() -> Result<()> {
             debounce_ms,
             quiet,
         } => run_watch(cfg, paths, debounce_ms, quiet).await,
+        Commands::RebuildVectors { batch, paths, dirty_only } => run_rebuild_vectors(cfg, batch, paths, dirty_only).await,
+        Commands::RebuildKeywordIndex { force, dirty_only } => {
+            run_rebuild_keyword_index(cfg, force, dirty_only).await
+        }
+        Commands::BackfillFullHashes { paths, exclude } => {
+            run_backfill_full_hashes(cfg, paths, exclude).await
+        }
+        Commands::Maintain {
+            paths,
+            exclude,
+            batch,
+        } => run_maintain(cfg, paths, exclude, batch).await,
     }
 }
 
@@ -320,6 +330,48 @@ enum Commands {
         #[arg(long, default_value_t = false)]
         quiet: bool,
     },
+    /// Rebuild vector payloads (path prefixes, mime/ext/mtime) for existing points
+    RebuildVectors {
+        /// Batch size for DB reads
+        #[arg(long, default_value_t = 500)]
+        batch: usize,
+        /// Only rebuild for given paths (comma-separated)
+        #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = Vec::<String>::new())]
+        paths: Vec<String>,
+        /// Only rebuild dirty paths (ignores --paths if set)
+        #[arg(long, default_value_t = false)]
+        dirty_only: bool,
+    },
+    /// Rebuild keyword index from all files
+    RebuildKeywordIndex {
+        /// Force refresh even if feature is disabled (no-op when not compiled)
+        #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Only rebuild dirty paths
+        #[arg(long, default_value_t = false)]
+        dirty_only: bool,
+    },
+    /// Rescan to backfill full hashes into the DB (uses hash_mode=full temporarily)
+    BackfillFullHashes {
+        /// Paths to scan (defaults to scan.include)
+        #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = Vec::<String>::new())]
+        paths: Vec<String>,
+        /// Exclude patterns
+        #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = Vec::<String>::new())]
+        exclude: Vec<String>,
+    },
+    /// Run common maintenance: backfill hashes, rebuild vectors (dirty), rebuild keyword index (dirty)
+    Maintain {
+        /// Limit to specific paths (optional)
+        #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = Vec::<String>::new())]
+        paths: Vec<String>,
+        /// Exclude patterns
+        #[arg(long, value_delimiter = ',', num_args = 1.., default_values_t = Vec::<String>::new())]
+        exclude: Vec<String>,
+        /// Batch size for vector rebuild
+        #[arg(long, default_value_t = 500)]
+        batch: usize,
+    },
 }
 
 async fn run_pipeline(cfg: AppConfig, mode: PipelineMode, json: bool) -> Result<()> {
@@ -424,6 +476,13 @@ async fn run_search(
                 })
             })
             .collect();
+        if let Some(pref) = &path_prefix {
+            results_json.retain(|r| {
+                extract_path(r)
+                    .map(|p| p.starts_with(pref))
+                    .unwrap_or(false)
+            });
+        }
         if let Some(allowed) = &tagged_paths {
             results_json.retain(|r| {
                 extract_path(r)
@@ -936,9 +995,10 @@ fn build_qdrant_filter(
 ) -> Option<serde_json::Value> {
     let mut must = Vec::new();
     if let Some(p) = path_prefix {
+        let pref = p.to_lowercase();
         must.push(serde_json::json!({
-            "key": "path",
-            "match": { "value": p }
+            "key": "path_prefixes",
+            "match": { "any": [pref] }
         }));
     }
     if let Some(m) = mime {
@@ -1230,4 +1290,139 @@ async fn run_watch(
     quiet: bool,
 ) -> Result<()> {
     watch::watch_paths(cfg, paths, debounce_ms, quiet).await
+}
+
+async fn run_rebuild_vectors(
+    cfg: AppConfig,
+    batch: usize,
+    paths: Vec<String>,
+    dirty_only: bool,
+) -> Result<()> {
+    let vector_store = pipeline::build_vector_store(&cfg);
+    let registry = pipeline::build_registry(&cfg);
+    let pool = storage::connect(&cfg.database.path).await?;
+    if let Some(qdrant) = vector_store.downcast_qdrant() {
+        let mut file_ids = Vec::new();
+        if dirty_only {
+            file_ids = sqlx::query_scalar::<_, i64>("SELECT id FROM files WHERE path IN (SELECT path FROM dirty)")
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_default();
+        } else if !paths.is_empty() {
+            for p in &paths {
+                if let Ok(Some(id)) =
+                    sqlx::query_scalar::<_, Option<i64>>("SELECT id FROM files WHERE path = ?")
+                        .bind(p)
+                        .fetch_one(&pool)
+                        .await
+                {
+                    file_ids.push(id);
+                }
+            }
+        }
+        if paths.is_empty() && !dirty_only {
+            // Re-embed all chunks to ensure payloads carry path_prefixes and metadata.
+            let embedded = embeddings::run_embedder(&pool, &registry, &qdrant, batch).await?;
+            println!("rebuild vectors: upserted {} chunks", embedded);
+        } else {
+            let embedded = embeddings::run_embedder_for_files(
+                &pool,
+                &registry,
+                &qdrant,
+                batch,
+                Some(&file_ids),
+            )
+            .await?;
+            println!(
+                "rebuild vectors: upserted {} chunks for {} paths",
+                embedded,
+                if dirty_only { file_ids.len() } else { paths.len() }
+            );
+        }
+    } else {
+        println!("Vector store not configured; skipping rebuild.");
+    }
+    Ok(())
+}
+
+async fn run_rebuild_keyword_index(cfg: AppConfig, force: bool, dirty_only: bool) -> Result<()> {
+    if !cfg!(feature = "keyword-index") && !force {
+        println!("keyword-index feature not enabled; rerun with --force to ignore.");
+        return Ok(());
+    }
+    let pool = storage::connect(&cfg.database.path).await?;
+    let paths = if dirty_only {
+        sqlx::query_scalar::<_, String>("SELECT path FROM dirty")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default()
+    } else {
+        sqlx::query_scalar::<_, String>("SELECT path FROM files")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default()
+    };
+    if paths.is_empty() {
+        println!("keyword index rebuild: no paths found (dirty_only={})", dirty_only);
+        return Ok(());
+    }
+    let dir = keyword_index_dir(&cfg.database.path);
+    let (docs, missing) =
+        crate::watch::keyword_index_docs_for_paths(&cfg.database.path, &paths, None).await?;
+    if dir.join("meta.json").exists() {
+        let _ = keyword_index::enabled::upsert_docs(&dir, &docs);
+        if !missing.is_empty() {
+            let _ = keyword_index::enabled::delete_docs(&dir, &missing);
+        }
+    } else {
+        let _ = keyword_index::enabled::build_index(&dir, &docs);
+    }
+    println!(
+        "keyword index rebuilt: {} docs, {} missing",
+        docs.len(),
+        missing.len()
+    );
+    Ok(())
+}
+
+async fn run_backfill_full_hashes(
+    cfg: AppConfig,
+    paths: Vec<String>,
+    exclude: Vec<String>,
+) -> Result<()> {
+    let roots: Vec<PathBuf> = if paths.is_empty() {
+        cfg.scan.include.iter().map(PathBuf::from).collect()
+    } else {
+        paths.into_iter().map(PathBuf::from).collect()
+    };
+    let excludes = if exclude.is_empty() {
+        cfg.scan.exclude.clone()
+    } else {
+        exclude
+    };
+    let hash_mode = organizer_core::scanner::HashMode::Full;
+    let pool = storage::connect(&cfg.database.path).await?;
+    storage::migrate(&pool).await?;
+    let discovered =
+        organizer_core::scanner::scan(&roots, &excludes, &hash_mode, &pool).await?;
+    println!(
+        "backfill full hashes: scanned {} files for full_hash population",
+        discovered
+    );
+    Ok(())
+}
+
+async fn run_maintain(
+    cfg: AppConfig,
+    paths: Vec<String>,
+    exclude: Vec<String>,
+    batch: usize,
+) -> Result<()> {
+    // 1) Backfill full hashes
+    run_backfill_full_hashes(cfg.clone(), paths.clone(), exclude.clone()).await?;
+    // 2) Rebuild vectors for dirty paths
+    run_rebuild_vectors(cfg.clone(), batch, Vec::new(), true).await?;
+    // 3) Rebuild keyword index for dirty paths
+    run_rebuild_keyword_index(cfg, false, true).await?;
+    Ok(())
 }

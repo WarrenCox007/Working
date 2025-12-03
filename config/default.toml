@@ -31,3 +31,12 @@ immediate_vector_delete = true
 
 [rules]
 path = "rules"
+
+[parsers]
+# Feature-gated; flags toggle runtime behavior.
+pdf = true
+office = true
+image_meta = true
+ocr = false
+max_ocr_bytes = 2_097_152   # 2 MB
+max_image_bytes = 20_971_520 # 20 MB
